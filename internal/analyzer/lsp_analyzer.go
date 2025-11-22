@@ -98,8 +98,5 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 
 // extractPkgPath extracts package path from URI
 func extractPkgPath(uri string) string {
-	// URI format: file:///path/to/project/cmd/servicename/main.go
-	// Extract: github.com/qbox/las/cmd/servicename
-	// This is a simplified implementation
 	return uri // TODO: implement proper extraction
 }
