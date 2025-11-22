@@ -10,13 +10,13 @@ import (
 
 // LSPImpactAnalyzer uses LSP client to analyze impact
 type LSPImpactAnalyzer struct {
-	tracer   *lsp.CallChainTracer
+	tracer   *lsp.DirectCallTracer
 	rootPath string
 }
 
 // NewLSPImpactAnalyzer creates a new LSP-based impact analyzer
 func NewLSPImpactAnalyzer(ctx context.Context, rootPath string) (*LSPImpactAnalyzer, error) {
-	tracer, err := lsp.NewCallChainTracer(ctx, rootPath)
+	tracer, err := lsp.NewDirectCallTracer(ctx, rootPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create LSP tracer: %w", err)
 	}
