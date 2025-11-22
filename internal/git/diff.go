@@ -14,16 +14,16 @@ import (
 type FileDiff struct {
 	Filename      string
 	Hunks         []HunkDiff
-	ChangedLines  []int  // 所有变更的行号
-	IsNewFile     bool   // 是否是新文件
-	IsDeletedFile bool   // 是否是删除的文件
+	ChangedLines  []int // 所有变更的行号
+	IsNewFile     bool  // 是否是新文件
+	IsDeletedFile bool  // 是否是删除的文件
 }
 
 // HunkDiff 代码块diff信息
 type HunkDiff struct {
-	NewStartLine int32
-	NewLines     int32
-	AddedLines   []LineDiff
+	NewStartLine  int32
+	NewLines      int32
+	AddedLines    []LineDiff
 	ModifiedLines []LineDiff // 修改的行
 }
 

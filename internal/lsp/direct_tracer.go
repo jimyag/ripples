@@ -34,11 +34,6 @@ func (t *DirectCallTracer) Close() error {
 
 // TraceToMain traces a symbol to all main functions that call it
 func (t *DirectCallTracer) TraceToMain(symbol *parser.Symbol) ([]CallPath, error) {
-	// Skip non-function symbols
-	if symbol.Kind != parser.SymbolKindFunction {
-		return nil, fmt.Errorf("symbol %s is not a function (kind: %v), skipping", symbol.Name, symbol.Kind)
-	}
-
 	// Convert position
 	pos := ripplesapi.Position{
 		Filename: symbol.Position.Filename,
@@ -46,8 +41,44 @@ func (t *DirectCallTracer) TraceToMain(symbol *parser.Symbol) ([]CallPath, error
 		Column:   symbol.Position.Column,
 	}
 
-	// Call API
-	apiPaths, err := t.tracer.TraceToMain(pos, symbol.Name)
+	var apiPaths []ripplesapi.CallPath
+	var err error
+
+	// Handle different symbol kinds
+	switch symbol.Kind {
+	case parser.SymbolKindFunction:
+		// Function: use existing TraceToMain
+		apiPaths, err = t.tracer.TraceToMain(pos, symbol.Name)
+
+	case parser.SymbolKindConstant, parser.SymbolKindVariable:
+		// Constant/Variable: find references and trace containing functions
+		apiPaths, err = t.tracer.TraceReferencesToMain(pos, symbol.Name)
+
+	case parser.SymbolKindInit:
+		// Init function: find all main packages that import this package
+		// Init functions are automatically executed when a package is imported
+		apiPaths, err = t.tracer.FindMainPackagesImporting(symbol.PackagePath)
+
+	case parser.SymbolKindImport:
+		// Blank import: same as init function - find all main packages that import this package
+		// Blank imports are used to trigger init functions (e.g., database driver registration)
+		// Get the imported package path from Extra
+		if importExtra, ok := symbol.Extra.(parser.ImportExtra); ok {
+			if importExtra.IsBlankImport() {
+				// For blank imports, trace which main packages import this
+				apiPaths, err = t.tracer.FindMainPackagesImporting(importExtra.Path)
+			} else {
+				// Non-blank imports are not tracked (they don't affect runtime behavior by themselves)
+				return nil, fmt.Errorf("only blank imports (_ import) are supported for tracing")
+			}
+		} else {
+			return nil, fmt.Errorf("import symbol missing ImportExtra information")
+		}
+
+	default:
+		return nil, fmt.Errorf("symbol kind %v not yet supported for tracing", symbol.Kind)
+	}
+
 	if err != nil {
 		return nil, err
 	}

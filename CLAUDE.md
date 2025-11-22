@@ -111,16 +111,20 @@ This prevents reporting Service B as affected when Service A merely references a
 ### Supported
 - **Functions**: Full support via `golang.PrepareCallHierarchy`
 - **Methods**: Full support (including receiver types)
+- **Constants**: Full support via `golang.References` API (added 2025-11-22)
+- **Global Variables**: Full support via `golang.References` API (added 2025-11-22)
+- **init Functions**: Full support via workspace package import analysis (added 2025-11-22)
+- **Blank Imports (_ import)**: Full support via workspace package import analysis (added 2025-11-22)
 
 ### Not Currently Supported
 - Type changes (struct field additions/removals)
-- Constant/variable changes
+- Struct field changes
 - Reflection-based calls (`reflect.Call`)
 - CGO calls
 - Interface method changes (may report inaccurately)
 - Callback functions (GORM hooks, HTTP handlers)
 
-The analyzer explicitly skips non-function symbols in [internal/analyzer/lsp_analyzer.go:43](internal/analyzer/lsp_analyzer.go#L43).
+See [internal/analyzer/lsp_analyzer.go](internal/analyzer/lsp_analyzer.go) for the `isSupportedSymbolKind` function that defines supported types.
 
 ## Module Structure
 
@@ -160,14 +164,96 @@ Performance depends on:
 - Deduplication (same call chain traced once)
 - Reusable Snapshot (immutable, cached type info)
 
-## Common Development Patterns
+## Development Guidelines
+
+### Test-Driven Development (CRITICAL)
+
+**MANDATORY**: Every new feature or bug fix MUST include corresponding unit tests.
+
+#### Testing Requirements
+
+1. **Write Tests First or Immediately After Implementation**
+   - DO NOT consider a feature complete without tests
+   - Tests should verify the functionality works as expected
+   - Tests should cover both happy path and edge cases
+
+2. **Test Location and Naming**
+   - Place tests in the same package as the code being tested
+   - Name test files with `_test.go` suffix (e.g., `lsp_analyzer_test.go`)
+   - Name test functions with `Test` prefix (e.g., `TestTraceConstantToMain`)
+
+3. **Test Quality Standards**
+   - Tests must be deterministic (not flaky)
+   - Tests should use `testdata/` directory for test fixtures
+   - Tests should clean up resources (use `defer tracer.Close()`)
+   - Tests should provide clear failure messages
+   - **NEVER initialize git repositories inside testdata directories** - testdata should be part of the main repository
+
+4. **Running Tests**
+   ```bash
+   # Run all tests
+   go test ./...
+
+   # Run specific test
+   go test -v ./internal/analyzer -run TestTraceConstantToMain
+
+   # Run with coverage
+   go test -cover ./...
+   ```
+
+5. **Example Test Structure**
+   ```go
+   func TestFeatureName(t *testing.T) {
+       // Setup
+       ctx := context.Background()
+       tracer, err := createTracer(ctx)
+       if err != nil {
+           t.Fatalf("Setup failed: %v", err)
+       }
+       defer tracer.Close()
+
+       // Execute
+       result, err := tracer.SomeMethod(input)
+
+       // Verify
+       if err != nil {
+           t.Errorf("Expected no error, got %v", err)
+       }
+       if result != expected {
+           t.Errorf("Expected %v, got %v", expected, result)
+       }
+   }
+   ```
 
 ### Adding Support for New Symbol Types
 
-To support type/constant changes:
-1. Remove the kind filter in [internal/analyzer/lsp_analyzer.go:43](internal/analyzer/lsp_analyzer.go#L43)
-2. Implement alternative tracing logic (LSP doesn't provide call hierarchy for non-functions)
-3. Consider using `golang.References` or `golang.Implementation` APIs instead
+When adding support for a new symbol type (e.g., struct fields, init functions):
+
+1. **Design the approach**
+   - Document the approach in `docs/EXTENDED_SUPPORT.md`
+   - Consider using `golang.References` for non-function symbols
+   - For init functions, analyze package import relationships
+
+2. **Implement in golang-tools fork**
+   - Add necessary methods to `gopls/internal/ripplesapi/tracer.go`
+   - Export types/methods via `gopls/pkg/ripplesapi/api.go`
+   - Commit changes with descriptive message
+
+3. **Integrate in ripples**
+   - Update `internal/lsp/direct_tracer.go` to handle new symbol kind
+   - Update `isSupportedSymbolKind` in `internal/analyzer/lsp_analyzer.go`
+   - Add the symbol kind to the switch statement in `TraceToMain`
+
+4. **Write comprehensive tests (REQUIRED)**
+   - Create test fixtures in `testdata/`
+   - Write unit tests in `internal/analyzer/*_test.go`
+   - Verify tests pass: `go test -v ./internal/analyzer`
+   - Example: See `constant_trace_test.go` for reference
+
+5. **Document the feature**
+   - Update README.md to reflect new capabilities
+   - Update CLAUDE.md (this file) in "Supported" section
+   - Add usage examples if applicable
 
 ### Debugging Analysis Issues
 
@@ -200,3 +286,93 @@ Minimal output showing only affected service names (useful for CI/CD pipelines)
 **Go Version**: Requires Go 1.25+ (uses latest language features)
 
 **Critical External Dependency**: The forked `github.com/jimyag/golang-tools` must remain compatible with this codebase. Any gopls API changes require updating both repositories in sync.
+
+## Recent Changes and Extensions
+
+### Constant and Variable Tracking (2025-11-22)
+
+Added support for tracking constants and global variables using gopls References API.
+
+**Implementation**:
+- Added `FindReferences`, `TraceReferencesToMain`, `findContainingFunction`, and `findFunctionDeclaration` methods to `golang-tools/gopls/internal/ripplesapi/tracer.go`
+- Updated `DirectCallTracer.TraceToMain` to handle `SymbolKindConstant` and `SymbolKindVariable`
+- Created comprehensive test suite in `internal/analyzer/constant_trace_test.go`
+
+**How it works**:
+1. Find all references to the constant/variable
+2. For each reference, find the containing function
+3. Trace each containing function to main
+4. Deduplicate and return affected services
+
+**Tests**: All 4 tests passing in `internal/analyzer/constant_trace_test.go`
+- `TestTraceConstantToMain` - Verifies constant tracking
+- `TestTraceVariableToMain` - Verifies variable tracking
+- `TestTraceFunctionToMain` - Verifies existing function tracking still works
+- `TestIsSupportedSymbolKind` - Verifies symbol kind filtering
+
+**Documentation**: See `docs/CONSTANT_VARIABLE_SUPPORT.md` for detailed implementation notes.
+
+### init Function Tracking (2025-11-22)
+
+Added support for tracking `init` functions using workspace-level package import analysis.
+
+**Implementation**:
+- Added `FindMainPackagesImporting` method to `golang-tools/gopls/internal/ripplesapi/tracer.go`
+- Uses `snapshot.LoadMetadataGraph()` to load all workspace packages
+- Recursively checks package dependencies to find all main packages that import the target package
+- Updated `DirectCallTracer.TraceToMain` to handle `SymbolKindInit`
+- Created comprehensive test suite in `internal/analyzer/init_trace_test.go`
+
+**How it works**:
+1. When an `init` function changes, get its package path
+2. Load complete workspace metadata graph using gopls
+3. Find all main packages in the workspace
+4. For each main package, recursively check if it imports the target package
+5. Return all main packages that import the changed package (directly or indirectly)
+
+**Key insight**: init functions run automatically when a package is imported, so any main package that imports the package (even transitively) is affected.
+
+**Test project structure** (`testdata/init-test`):
+- Multiple services: `server`, `api-server`, `worker`
+- Shared packages: `pkg/config`, `internal/db`, `internal/cache`, `internal/logger`
+- Different import relationships to test various scenarios
+
+**Tests**: All tests passing in `internal/analyzer/init_trace_test.go`
+- `TestTraceInitToMain/config.init` - Verifies config package affects all 3 services
+- `TestTraceInitToMain/db.init` - Verifies db package affects all 3 services
+- `TestTraceInitToMain/cache.init` - Verifies cache affects only server and api-server
+- `TestTraceInitToMain/logger.init` - Verifies logger affects only api-server
+- `TestIsSupportedSymbolKindInit` - Verifies init is supported
+
+**Performance**: Uses gopls's cached metadata graph for efficient lookup across large codebases.
+
+### Blank Import Tracking (2025-11-22)
+
+Added support for tracking blank imports (`_ import`) which are commonly used to trigger init functions.
+
+**Implementation**:
+- Reuses `FindMainPackagesImporting` from init function tracking
+- Added blank import handling in `internal/lsp/direct_tracer.go`
+- Validates that imports are blank (alias == "_") before tracing
+- Created comprehensive test suite in `internal/analyzer/blank_import_test.go`
+
+**How it works**:
+1. Detect blank import change (e.g., `_ "database/sql/driver"`)
+2. Extract the imported package path from `ImportExtra`
+3. Verify it's a blank import (not a normal import)
+4. Use `FindMainPackagesImporting` to find all main packages that import it
+5. Return affected services
+
+**Key insight**: Blank imports are primarily used to trigger side effects (usually init functions), so tracking them is equivalent to tracking which main packages import the target package.
+
+**Common use cases**:
+- Database driver registration: `_ "github.com/lib/pq"`
+- Plugin registration
+- Side-effect initialization
+
+**Tests**: All tests passing in `internal/analyzer/blank_import_test.go`
+- `TestTraceBlankImportToMain` - Verifies blank import tracking for multiple packages
+- `TestBlankImportVsNormalImport` - Verifies only blank imports are traced (normal imports rejected)
+- `TestIsSupportedSymbolKindImport` - Verifies import symbol kind support
+
+**Note**: Only blank imports (`_`) are tracked. Normal imports are not tracked as they don't affect runtime behavior by themselves.

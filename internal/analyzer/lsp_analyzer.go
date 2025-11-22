@@ -38,9 +38,14 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 	seenBinaries := make(map[string]bool)
 
 	for _, change := range changes {
-		// Skip non-function symbols (types, constants, variables, packages)
-		// LSP call hierarchy only works for functions
-		if change.Symbol.Kind != parser.SymbolKindFunction {
+		// Check if this symbol kind is supported
+		if !isSupportedSymbolKind(change.Symbol.Kind) {
+			if change.Symbol.Kind != parser.SymbolKindStruct &&
+				change.Symbol.Kind != parser.SymbolKindInterface &&
+				change.Symbol.Kind != parser.SymbolKindType {
+				fmt.Printf("Info: symbol kind %v not yet supported, skipping %s\n",
+					change.Symbol.Kind, change.Symbol.Name)
+			}
 			continue
 		}
 
@@ -50,12 +55,14 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 			Kind:        change.Symbol.Kind,
 			Position:    change.Symbol.Position,
 			PackagePath: change.Symbol.PackagePath,
+			Extra:       change.Symbol.Extra, // Include Extra for import information
 		}
 
 		// Trace to main functions
 		paths, err := a.tracer.TraceToMain(symbol)
 		if err != nil {
-			fmt.Printf("Warning: failed to trace symbol %s: %v\n", symbol.Name, err)
+			fmt.Printf("Warning: failed to trace symbol %s (%v): %v\n",
+				symbol.Name, symbol.Kind, err)
 			continue
 		}
 
@@ -99,4 +106,18 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 // extractPkgPath extracts package path from URI
 func extractPkgPath(uri string) string {
 	return uri // TODO: implement proper extraction
+}
+
+// isSupportedSymbolKind checks if a symbol kind is supported for tracing
+func isSupportedSymbolKind(kind parser.SymbolKind) bool {
+	switch kind {
+	case parser.SymbolKindFunction,
+		parser.SymbolKindConstant,
+		parser.SymbolKindVariable,
+		parser.SymbolKindInit,
+		parser.SymbolKindImport:
+		return true
+	default:
+		return false
+	}
 }

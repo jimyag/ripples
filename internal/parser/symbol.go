@@ -55,11 +55,11 @@ type FunctionExtra struct {
 
 // TypeExtra 类型符号的额外信息
 type TypeExtra struct {
-	UnderlyingType string      // 底层类型
-	IsStruct       bool        // 是否是结构体
-	IsInterface    bool        // 是否是接口
-	Fields         []*Symbol   // 字段(如果是结构体)
-	Methods        []*Symbol   // 方法
+	UnderlyingType string    // 底层类型
+	IsStruct       bool      // 是否是结构体
+	IsInterface    bool      // 是否是接口
+	Fields         []*Symbol // 字段(如果是结构体)
+	Methods        []*Symbol // 方法
 }
 
 // ContainsLine 判断符号是否包含指定行

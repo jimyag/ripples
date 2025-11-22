@@ -25,7 +25,7 @@ require (
 	mvdan.cc/gofumpt v0.8.0 // indirect
 )
 
-// 使用远程 tools 仓库
-replace golang.org/x/tools => github.com/jimyag/golang-tools v0.0.0-20251122074114-b3afd1a0c514
+// 使用本地 tools 仓库进行开发
+replace golang.org/x/tools => ../golang-tools
 
-replace golang.org/x/tools/gopls => github.com/jimyag/golang-tools/gopls v0.0.0-20251122074114-b3afd1a0c514
+replace golang.org/x/tools/gopls => ../golang-tools/gopls
