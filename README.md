@@ -122,7 +122,12 @@ go build -o ripples
 
 - 不支持反射调用和 cgo
 - 不支持动态加载的包（plugin）
-- 接口方法和回调函数可能报告不准确
+- 不支持跨语言调用
+
+## 文档
+
+- [跨服务误报修复方案](docs/CROSS_SERVICE_FALSE_POSITIVE_FIX.md)
+- [实现说明](docs/IMPLEMENTATION_NOTES.md)
 
 ## 开发
 
