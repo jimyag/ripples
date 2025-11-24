@@ -26,7 +26,7 @@ func init() {
 	flag.StringVar(&repoPath, "repo", ".", "Git 仓库路径")
 	flag.StringVar(&oldCommit, "old", "", "旧 commit ID (必填)")
 	flag.StringVar(&newCommit, "new", "", "新 commit ID (必填)")
-	flag.StringVar(&outputType, "output", "text", "输出格式: text, json, summary")
+	flag.StringVar(&outputType, "output", "simple", "输出格式: simple, text, json, summary")
 	flag.BoolVar(&verbose, "verbose", false, "详细输出")
 }
 
@@ -164,9 +164,17 @@ func main() {
 		reporter.PrintSummary()
 
 	case "text":
+		reporter.PrintText()
+
+	case "simple":
 		fallthrough
 	default:
-		reporter.PrintText()
+		reporter.PrintSimple()
+	}
+
+	// 如果没有发现受影响的服务，返回非0退出码
+	if len(results) == 0 {
+		os.Exit(0) // 无影响也算成功
 	}
 
 	// 打印总耗时

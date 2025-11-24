@@ -74,3 +74,10 @@ func (r *Reporter) PrintSummary() {
 		fmt.Printf("- %s\n", res.Name)
 	}
 }
+
+// PrintSimple 打印简化格式 - 仅服务名，每行一个（适合脚本解析）
+func (r *Reporter) PrintSimple() {
+	for _, res := range r.results {
+		fmt.Println(res.Name)
+	}
+}

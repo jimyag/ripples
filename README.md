@@ -30,13 +30,18 @@ go build -o ripples
 
 ### 参数说明
 
-| 参数       | 说明                              | 默认值       |
-| ---------- | --------------------------------- | ------------ |
-| `-repo`    | Git 仓库路径                      | 当前目录 `.` |
-| `-old`     | 旧 commit ID 或分支名             | 必填         |
-| `-new`     | 新 commit ID 或分支名             | 必填         |
-| `-output`  | 输出格式：`text`/`json`/`summary` | `text`       |
-| `-verbose` | 显示详细日志                      | `false`      |
+| 参数       | 说明                                          | 默认值       |
+| ---------- | --------------------------------------------- | ------------ |
+| `-repo`    | Git 仓库路径                                  | 当前目录 `.` |
+| `-old`     | 旧 commit ID 或分支名                         | 必填         |
+| `-new`     | 新 commit ID 或分支名                         | 必填         |
+| `-output`  | 输出格式：`simple`/`text`/`json`/`summary`    | `simple`     |
+| `-verbose` | 显示详细日志                                  | `false`      |
+
+### Exit Code
+
+- **成功**: 返回 `0`（无论是否发现受影响的服务）
+- **失败**: 返回 `1`（Git 操作失败、解析失败、分析失败等）
 
 ### 使用示例
 
@@ -49,6 +54,17 @@ go build -o ripples
 
 # 简短摘要
 ./ripples -repo ~/project -old HEAD~1 -new HEAD -output summary
+
+# 简化输出（适合脚本解析）- 每行一个服务名
+./ripples -repo ~/project -old main -new develop -output simple
+
+# 在脚本中使用
+SERVICES=$(./ripples -repo . -old main -new develop -output simple)
+if [ $? -eq 0 ]; then
+    for service in $SERVICES; do
+        echo "需要部署: $service"
+    done
+fi
 ```
 
 ## 工作原理
@@ -114,7 +130,9 @@ rm -rf ~/.cache/gopls/ripples-trace/
 
 ## 输出格式示例
 
-### 文本格式
+### 文本格式 (text)
+
+适合人类阅读，包含完整调用链：
 
 ```
 受影响的服务: 2
@@ -126,7 +144,9 @@ rm -rf ~/.cache/gopls/ripples-trace/
   -> github.com/example/project/internal/service.ProcessRequest (Changed)
 ```
 
-### JSON 格式
+### JSON 格式 (json)
+
+适合程序解析，结构化数据：
 
 ```json
 [
@@ -142,12 +162,42 @@ rm -rf ~/.cache/gopls/ripples-trace/
 ]
 ```
 
-### 摘要格式
+### 摘要格式 (summary)
+
+简短摘要，带统计信息：
 
 ```
 受影响的服务: 2
 - api-server
 - worker
+```
+
+### 简化格式 (simple)
+
+**最适合脚本解析**，每行一个服务名：
+
+```
+api-server
+worker
+```
+
+**优点**：
+- ✅ 每行一个服务名，便于脚本处理
+- ✅ 无额外格式，直接可用
+- ✅ 支持包含特殊字符的服务名（包括空格、连字符等）
+- ✅ 配合 exit code 判断成功/失败
+
+**使用场景**：
+```bash
+# CI/CD 中触发部署
+for service in $(./ripples -output simple); do
+    deploy.sh "$service"
+done
+
+# 检查特定服务是否受影响
+if ./ripples -output simple | grep -q "^my-service$"; then
+    echo "my-service 需要更新"
+fi
 ```
 
 ## 支持的符号类型
