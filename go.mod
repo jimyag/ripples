@@ -28,7 +28,7 @@ require (
 	mvdan.cc/gofumpt v0.8.0 // indirect
 )
 
-// 使用自定义的 golang-tools fork（包含 ripples 相关修改）
-replace golang.org/x/tools => github.com/jimyag/golang-tools v0.0.0-20251122140332-71cef28b3361
+// 使用 fork 的 golang-tools 以访问 gopls 内部 API
+replace golang.org/x/tools => github.com/jimyag/golang-tools v0.0.0-20251124095516-d87dcafefd00
 
-replace golang.org/x/tools/gopls => github.com/jimyag/golang-tools/gopls v0.0.0-20251122140332-71cef28b3361
+replace golang.org/x/tools/gopls => github.com/jimyag/golang-tools/gopls v0.0.0-20251124095516-d87dcafefd00

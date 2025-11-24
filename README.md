@@ -64,6 +64,54 @@ go build -o ripples
 5. 结果输出 → 汇总并格式化
 ```
 
+## 性能特性
+
+### 持久化缓存
+
+ripples 使用 gopls 的 filecache 机制进行持久化缓存，显著提升重复分析的速度：
+
+- **首次运行**：~15-50 秒（取决于项目大小）
+- **重复运行**：~5 秒（**90% 更快**）
+
+缓存特点：
+- 自动管理：无需手动清理
+- 跨运行持久化：进程重启后仍有效
+- 内容寻址：自动去重
+- 线程安全：支持并发访问
+
+### 性能优化
+
+1. **惰性加载**：只加载变更包，不加载整个项目
+2. **并发追踪**：多个符号并行分析
+3. **智能缓存**：内存 + 磁盘双层缓存
+4. **过滤优化**：自动跳过测试函数
+
+### 调试模式
+
+启用详细日志查看缓存命中情况：
+
+```bash
+RIPPLES_DEBUG=1 ./ripples -repo ~/project -old main -new develop
+```
+
+输出示例：
+```json
+{"level":"debug","message":"Using PERSISTENT cached trace"}
+{"level":"debug","message":"Stored trace in PERSISTENT cache"}
+```
+
+### 缓存位置
+
+缓存存储在 gopls 缓存目录：
+```
+~/.cache/gopls/ripples-trace/
+```
+
+清空缓存（如需）：
+```bash
+rm -rf ~/.cache/gopls/ripples-trace/
+```
+
 ## 输出格式示例
 
 ### 文本格式
@@ -128,6 +176,7 @@ go build -o ripples
 
 - [跨服务误报修复方案](docs/CROSS_SERVICE_FALSE_POSITIVE_FIX.md)
 - [实现说明](docs/IMPLEMENTATION_NOTES.md)
+- [持久化缓存实现](PERSISTENT_CACHE.md)
 
 ## 开发
 

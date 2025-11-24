@@ -56,6 +56,62 @@ func (p *Parser) LoadProject(projectPath string) error {
 	return nil
 }
 
+// LoadChangedFiles 只加载包含变更文件的包（性能优化）
+func (p *Parser) LoadChangedFiles(projectPath string, changedFiles []string) error {
+	if len(changedFiles) == 0 {
+		// 没有变更文件，使用标准加载
+		return p.LoadProject(projectPath)
+	}
+
+	// 将文件路径转换为包路径
+	packagePatterns := make(map[string]bool)
+	for _, file := range changedFiles {
+		// 获取文件所在的目录作为包路径
+		dir := filepath.Dir(file)
+		if dir == "." {
+			packagePatterns["."] = true
+		} else {
+			// 支持通配符，加载包及其子包
+			packagePatterns["./"+dir] = true
+		}
+	}
+
+	// 转换为切片
+	var patterns []string
+	for pattern := range packagePatterns {
+		patterns = append(patterns, pattern)
+	}
+
+	cfg := &packages.Config{
+		Mode: packages.LoadAllSyntax,
+		Fset: p.fset,
+		Dir:  projectPath,
+	}
+
+	pkgs, err := packages.Load(cfg, patterns...)
+	if err != nil {
+		return fmt.Errorf("加载变更包失败: %w", err)
+	}
+
+	// 检查是否有错误
+	var hasErrors bool
+	for _, pkg := range pkgs {
+		if len(pkg.Errors) > 0 {
+			hasErrors = true
+			for _, err := range pkg.Errors {
+				fmt.Printf("包 %s 错误: %v\n", pkg.PkgPath, err)
+			}
+		}
+	}
+
+	if hasErrors {
+		return fmt.Errorf("部分包加载失败")
+	}
+
+	p.packages = pkgs
+	return nil
+}
+
 // ParseFile 解析单个文件的符号
 func (p *Parser) ParseFile(filename string) ([]*Symbol, error) {
 	absFilename, err := filepath.Abs(filename)

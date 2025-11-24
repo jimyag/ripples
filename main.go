@@ -49,11 +49,39 @@ func main() {
 
 	startTime := time.Now()
 
-	// 1. 初始化 Parser
-	p := parser.NewParser()
-	if err := p.LoadProject(repoPath); err != nil {
-		fmt.Fprintf(os.Stderr, "加载项目失败: %v\n", err)
+	// 1. 获取变更文件列表（用于优化 Parser 加载）
+	if verbose {
+		fmt.Println("⏱️  步骤 1/6: 检测变更文件...")
+	}
+	detectFilesStart := time.Now()
+	diffContent, err := analyzer.GetGitDiffContent(repoPath, oldCommit, newCommit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "获取 git diff 失败: %v\n", err)
 		os.Exit(1)
+	}
+	changedFiles := analyzer.ExtractChangedGoFiles(diffContent)
+	if verbose {
+		fmt.Printf("   ✅ 检测到 %d 个变更文件 (耗时: %v)\n", len(changedFiles), time.Since(detectFilesStart))
+	}
+
+	// 2. 初始化 Parser（只加载变更文件相关的包）
+	if verbose {
+		fmt.Println("\n⏱️  步骤 2/6: 初始化 Parser (只加载变更包)...")
+	}
+	parseStart := time.Now()
+	p := parser.NewParser()
+	if err := p.LoadChangedFiles(repoPath, changedFiles); err != nil {
+		// 如果加载失败，回退到加载整个项目
+		if verbose {
+			fmt.Printf("   ⚠️  加载变更包失败，回退到加载整个项目: %v\n", err)
+		}
+		if err := p.LoadProject(repoPath); err != nil {
+			fmt.Fprintf(os.Stderr, "加载项目失败: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if verbose {
+		fmt.Printf("   ✅ Parser 初始化完成 (耗时: %v)\n", time.Since(parseStart))
 	}
 
 	// 获取当前模块名
@@ -70,7 +98,11 @@ func main() {
 		fmt.Printf("当前模块: %s\n", currentModule)
 	}
 
-	// 2. 初始化 LSP Impact Analyzer
+	// 3. 初始化 LSP Impact Analyzer
+	if verbose {
+		fmt.Println("\n⏱️  步骤 3/6: 初始化 LSP 分析器 (gopls)...")
+	}
+	lspStart := time.Now()
 	ctx := context.Background()
 	lspAnalyzer, err := analyzer.NewLSPImpactAnalyzer(ctx, repoPath)
 	if err != nil {
@@ -80,10 +112,14 @@ func main() {
 	defer lspAnalyzer.Close()
 
 	if verbose {
-		fmt.Println("✅ LSP 分析器已启动")
+		fmt.Printf("   ✅ LSP 分析器初始化完成 (耗时: %v)\n", time.Since(lspStart))
 	}
 
-	// 3. 检测变更
+	// 4. 检测变更符号
+	if verbose {
+		fmt.Println("\n⏱️  步骤 4/6: 检测变更符号...")
+	}
+	detectStart := time.Now()
 	cd := analyzer.NewChangeDetector(p, repoPath)
 	changes, err := cd.DetectChanges(oldCommit, newCommit)
 	if err != nil {
@@ -92,10 +128,14 @@ func main() {
 	}
 
 	if verbose {
-		fmt.Printf("检测到 %d 个变更符号\n", len(changes))
+		fmt.Printf("   ✅ 检测到 %d 个变更符号 (耗时: %v)\n", len(changes), time.Since(detectStart))
 	}
 
-	// 4. 分析影响
+	// 5. 分析影响
+	if verbose {
+		fmt.Println("\n⏱️  步骤 5/6: 追踪调用链到 main 函数...")
+	}
+	analyzeStart := time.Now()
 	results, err := lspAnalyzer.Analyze(changes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "分析失败: %v\n", err)
@@ -103,11 +143,14 @@ func main() {
 	}
 
 	if verbose {
-		fmt.Printf("分析完成，耗时: %v\n", time.Since(startTime))
-		fmt.Println()
+		fmt.Printf("   ✅ 调用链追踪完成 (耗时: %v)\n", time.Since(analyzeStart))
+		fmt.Printf("   📊 发现 %d 个受影响的服务\n", len(results))
 	}
 
-	// 4. 输出结果
+	// 6. 输出结果
+	if verbose {
+		fmt.Println("\n⏱️  步骤 6/6: 输出结果...")
+	}
 	reporter := output.NewReporter(results)
 
 	switch outputType {
@@ -126,9 +169,11 @@ func main() {
 		reporter.PrintText()
 	}
 
-	// 5. 打印总耗时
+	// 打印总耗时
 	if verbose {
-		fmt.Printf("\n总耗时: %v\n", time.Since(startTime))
+		fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("⏱️  总耗时: %v\n", time.Since(startTime))
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 	}
 }
 

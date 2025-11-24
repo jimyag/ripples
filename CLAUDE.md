@@ -19,6 +19,36 @@ go build -o ripples main.go
 go build -o ripples
 ```
 
+### Updating Dependencies
+
+When updating the golang-tools dependency:
+
+**DO NOT** manually query and write version numbers. Instead:
+
+1. Write replace directive without version or with placeholder:
+   ```go
+   replace golang.org/x/tools => github.com/jimyag/golang-tools latest
+   ```
+
+2. Let `go mod tidy` resolve the actual version:
+   ```bash
+   go mod tidy
+   ```
+
+3. This will automatically fetch the latest commit and update go.mod with the correct pseudo-version.
+
+**Example workflow**:
+```bash
+# Edit go.mod - use "latest" or no version
+vim go.mod
+
+# Let go mod tidy resolve it
+go mod tidy
+
+# Verify it works
+go build
+```
+
 ### Testing
 ```bash
 # Run all unit tests
@@ -224,6 +254,42 @@ Performance depends on:
        }
    }
    ```
+
+### Documentation and Privacy Guidelines
+
+**CRITICAL**: When writing code, tests, or documentation:
+
+1. **Never reference actual internal projects**
+   - ❌ DO NOT use real project names (e.g., specific company projects)
+   - ❌ DO NOT include real repository paths
+   - ❌ DO NOT include real commit hashes from internal projects
+   - ✅ DO use generic examples (e.g., "Example: Large Monorepo")
+   - ✅ DO use placeholder paths (e.g., `~/project`, `testdata/`)
+   - ✅ DO use generic commit hashes (e.g., `abc123`, `def456`)
+
+2. **Public documentation (README.md, PERSISTENT_CACHE.md)**
+   - Use only generic, anonymized examples
+   - Focus on feature descriptions and usage patterns
+   - Performance metrics should use "Example Project" labels
+
+3. **Development documentation (CLAUDE.md)**
+   - Can reference test methodology
+   - Should still avoid specific project names
+   - Use generic repository descriptions
+
+4. **Code and tests**
+   - Use `testdata/` for test fixtures
+   - Create synthetic test projects
+   - Never hardcode real project paths
+
+**Example of proper documentation**:
+```markdown
+# Good
+./ripples -repo ~/project -old main -new develop
+
+# Bad
+./ripples -repo ~/src/work/github/company-project -old abc123... -new develop
+```
 
 ### Adding Support for New Symbol Types
 

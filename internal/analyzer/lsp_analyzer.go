@@ -3,6 +3,7 @@ package analyzer
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/jimyag/ripples/internal/lsp"
 	"github.com/jimyag/ripples/internal/parser"
@@ -34,11 +35,9 @@ func (a *LSPImpactAnalyzer) Close() error {
 
 // Analyze analyzes the impact of changed symbols
 func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, error) {
-	var results []AffectedBinary
-	seenBinaries := make(map[string]bool)
-
+	// Filter out unsupported symbols first
+	var supportedChanges []ChangedSymbol
 	for _, change := range changes {
-		// Check if this symbol kind is supported
 		if !isSupportedSymbolKind(change.Symbol.Kind) {
 			if change.Symbol.Kind != parser.SymbolKindStruct &&
 				change.Symbol.Kind != parser.SymbolKindInterface &&
@@ -48,32 +47,66 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 			}
 			continue
 		}
+		supportedChanges = append(supportedChanges, change)
+	}
 
-		// Convert ChangedSymbol to parser.Symbol
-		symbol := &parser.Symbol{
-			Name:        change.Symbol.Name,
-			Kind:        change.Symbol.Kind,
-			Position:    change.Symbol.Position,
-			PackagePath: change.Symbol.PackagePath,
-			Extra:       change.Symbol.Extra, // Include Extra for import information
-		}
+	if len(supportedChanges) == 0 {
+		return nil, nil
+	}
 
-		// Trace to main functions
-		paths, err := a.tracer.TraceToMain(symbol)
-		if err != nil {
-			fmt.Printf("Warning: failed to trace symbol %s (%v): %v\n",
-				symbol.Name, symbol.Kind, err)
+	// Concurrent processing
+	type traceResult struct {
+		paths []lsp.CallPath
+		err   error
+	}
+
+	results := make(chan traceResult, len(supportedChanges))
+	var wg sync.WaitGroup
+
+	// Process symbols concurrently
+	for _, change := range supportedChanges {
+		wg.Add(1)
+		go func(ch ChangedSymbol) {
+			defer wg.Done()
+
+			// Convert ChangedSymbol to parser.Symbol
+			symbol := &parser.Symbol{
+				Name:        ch.Symbol.Name,
+				Kind:        ch.Symbol.Kind,
+				Position:    ch.Symbol.Position,
+				PackagePath: ch.Symbol.PackagePath,
+				Extra:       ch.Symbol.Extra,
+			}
+
+			// Trace to main functions
+			paths, err := a.tracer.TraceToMain(symbol)
+			results <- traceResult{paths: paths, err: err}
+		}(change)
+	}
+
+	// Close results channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	var affectedBinaries []AffectedBinary
+	seenBinaries := make(map[string]bool)
+
+	for res := range results {
+		if res.err != nil {
+			fmt.Printf("Warning: failed to trace symbol: %v\n", res.err)
 			continue
 		}
 
-		// Convert paths to AffectedBinary
-		for _, path := range paths {
+		for _, path := range res.paths {
 			if seenBinaries[path.BinaryName] {
 				continue
 			}
 			seenBinaries[path.BinaryName] = true
 
-			// Format path strings with package information
+			// Format path strings
 			var pathStrs []string
 			for i, node := range path.Path {
 				var formatted string
@@ -92,7 +125,7 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 				}
 			}
 
-			results = append(results, AffectedBinary{
+			affectedBinaries = append(affectedBinaries, AffectedBinary{
 				Name:      path.BinaryName,
 				PkgPath:   extractPkgPath(path.MainURI),
 				TracePath: pathStrs,
@@ -100,7 +133,7 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 		}
 	}
 
-	return results, nil
+	return affectedBinaries, nil
 }
 
 // extractPkgPath extracts package path from URI
