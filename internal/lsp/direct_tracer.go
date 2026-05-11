@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jimyag/ripples/internal/parser"
 	"golang.org/x/tools/gopls/pkg/ripplesapi"
@@ -50,8 +51,25 @@ func (t *DirectCallTracer) TraceToMain(symbol *parser.Symbol) ([]CallPath, error
 		// Function: use existing TraceToMain
 		apiPaths, err = t.tracer.TraceToMain(pos, symbol.Name)
 
-	case parser.SymbolKindConstant, parser.SymbolKindVariable:
-		// Constant/Variable: find references and trace containing functions
+	case parser.SymbolKindConstant,
+		parser.SymbolKindVariable,
+		parser.SymbolKindType,
+		parser.SymbolKindTypeAlias,
+		parser.SymbolKindStruct,
+		parser.SymbolKindStructField,
+		parser.SymbolKindInterface:
+		if serviceID := serviceIdentifier(symbol.PackagePath); serviceID != "" {
+			apiPaths, err = t.tracer.FindMainPackagesImporting(symbol.PackagePath)
+			if err != nil {
+				return nil, err
+			}
+			apiPaths = filterPathsByBinary(apiPaths, serviceID)
+			if len(apiPaths) > 0 {
+				break
+			}
+		}
+		// Declarations without direct call hierarchy: find references and trace
+		// containing functions back to main.
 		apiPaths, err = t.tracer.TraceReferencesToMain(pos, symbol.Name)
 
 	case parser.SymbolKindInit:
@@ -102,4 +120,26 @@ func (t *DirectCallTracer) TraceToMain(symbol *parser.Symbol) ([]CallPath, error
 	}
 
 	return paths, nil
+}
+
+func serviceIdentifier(pkgPath string) string {
+	parts := strings.Split(pkgPath, "/")
+	for i, part := range parts {
+		if part == "internal" || part == "services" || part == "apps" || part == "api" {
+			if i+1 < len(parts) {
+				return parts[i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func filterPathsByBinary(paths []ripplesapi.CallPath, binaryName string) []ripplesapi.CallPath {
+	filtered := paths[:0]
+	for _, path := range paths {
+		if path.BinaryName == binaryName {
+			filtered = append(filtered, path)
+		}
+	}
+	return filtered
 }

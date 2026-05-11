@@ -3,6 +3,7 @@ package analyzer
 import (
 	"fmt"
 	"go/token"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -54,15 +55,30 @@ func (cd *ChangeDetector) DetectChanges(oldCommit, newCommit string) ([]ChangedS
 	}
 
 	var changedSymbols []ChangedSymbol
+	var parseErrors []error
 
 	// 2. 分析每个变更的文件
 	for _, fileDiff := range fileDiffs {
-		if fileDiff.IsDeletedFile {
+		// 只分析 Go 文件
+		if !isRuntimeGoFile(fileDiff.Filename) {
 			continue
 		}
 
-		// 只分析 Go 文件
-		if !strings.HasSuffix(fileDiff.Filename, ".go") {
+		if fileDiff.IsDeletedFile {
+			packagePath := cd.packagePathForFile(fileDiff.Filename)
+			if packagePath == "" {
+				parseErrors = append(parseErrors, fmt.Errorf("无法推断已删除文件的包路径: %s", fileDiff.Filename))
+				continue
+			}
+			changedSymbols = append(changedSymbols, ChangedSymbol{
+				Symbol: &parser.Symbol{
+					Name:        filepath.Base(fileDiff.Filename),
+					Kind:        parser.SymbolKindInit,
+					PackagePath: packagePath,
+				},
+				ChangeType:  ChangeTypeDelete,
+				PackagePath: packagePath,
+			})
 			continue
 		}
 
@@ -70,9 +86,7 @@ func (cd *ChangeDetector) DetectChanges(oldCommit, newCommit string) ([]ChangedS
 		absFilename := filepath.Join(cd.projectPath, fileDiff.Filename)
 		symbols, err := cd.parser.ParseFile(absFilename)
 		if err != nil {
-			// 如果是新文件，可能还未被 parser 加载（如果 parser 是预加载的）
-			// 这里假设 parser 已经加载了最新的代码
-			// 如果解析失败，可能是语法错误，跳过
+			parseErrors = append(parseErrors, fmt.Errorf("%s: %w", fileDiff.Filename, err))
 			continue
 		}
 
@@ -81,7 +95,15 @@ func (cd *ChangeDetector) DetectChanges(oldCommit, newCommit string) ([]ChangedS
 		changedSymbols = append(changedSymbols, fileChangedSymbols...)
 	}
 
+	if len(parseErrors) > 0 {
+		return changedSymbols, fmt.Errorf("解析变更文件失败: %v", parseErrors)
+	}
+
 	return changedSymbols, nil
+}
+
+func isRuntimeGoFile(filename string) bool {
+	return strings.HasSuffix(filename, ".go") && !strings.HasSuffix(filename, "_test.go")
 }
 
 // mapLinesToSymbols 将变更行映射到符号
@@ -107,12 +129,51 @@ func (cd *ChangeDetector) mapLinesToSymbols(symbols []*parser.Symbol, changedLin
 	return res
 }
 
-// findTopLevelSymbolContainingLine 找到包含指定行的顶层符号
+// findTopLevelSymbolContainingLine 找到包含指定行的最小符号
 func (cd *ChangeDetector) findTopLevelSymbolContainingLine(symbols []*parser.Symbol, fset *token.FileSet, line int) *parser.Symbol {
+	var best *parser.Symbol
+	bestWidth := int(^uint(0) >> 1)
+
 	for _, s := range symbols {
-		if s.ContainsLine(fset, line) {
-			return s
+		if !s.ContainsLine(fset, line) {
+			continue
+		}
+
+		startLine := fset.Position(s.StartPos).Line
+		endLine := fset.Position(s.EndPos).Line
+		width := endLine - startLine
+		if best == nil || width < bestWidth {
+			best = s
+			bestWidth = width
 		}
 	}
-	return nil
+	return best
+}
+
+func (cd *ChangeDetector) packagePathForFile(filename string) string {
+	modulePath := getModulePath(cd.projectPath)
+	if modulePath == "" {
+		return ""
+	}
+
+	dir := filepath.Dir(filepath.ToSlash(filename))
+	if dir == "." {
+		return modulePath
+	}
+	return modulePath + "/" + strings.TrimPrefix(dir, "./")
+}
+
+func getModulePath(projectPath string) string {
+	content, err := os.ReadFile(filepath.Join(projectPath, "go.mod"))
+	if err != nil {
+		return ""
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
+		}
+	}
+	return ""
 }

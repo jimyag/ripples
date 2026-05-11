@@ -168,9 +168,9 @@ func TestIsSupportedSymbolKindImport(t *testing.T) {
 		{parser.SymbolKindVariable, true},
 		{parser.SymbolKindInit, true},
 		{parser.SymbolKindImport, true}, // Now supported
-		{parser.SymbolKindStruct, false},
-		{parser.SymbolKindInterface, false},
-		{parser.SymbolKindType, false},
+		{parser.SymbolKindStruct, true},
+		{parser.SymbolKindInterface, true},
+		{parser.SymbolKindType, true},
 	}
 
 	for _, tt := range tests {

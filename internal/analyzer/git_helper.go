@@ -1,10 +1,6 @@
 package analyzer
 
-import (
-	"strings"
-
-	"github.com/jimyag/ripples/internal/git"
-)
+import "github.com/jimyag/ripples/internal/git"
 
 // GetGitDiffContent 获取 git diff 内容
 func GetGitDiffContent(repoPath, oldCommit, newCommit string) ([]byte, error) {
@@ -24,8 +20,8 @@ func ExtractChangedGoFiles(diffContent []byte) []string {
 			continue
 		}
 
-		// 只包含 Go 文件
-		if strings.HasSuffix(fileDiff.Filename, ".go") {
+		// 只包含运行时代码文件；测试文件不影响服务部署范围。
+		if isRuntimeGoFile(fileDiff.Filename) {
 			changedFiles = append(changedFiles, fileDiff.Filename)
 		}
 	}

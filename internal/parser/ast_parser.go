@@ -312,7 +312,18 @@ func (p *Parser) extractTypeSpec(typeSpec *ast.TypeSpec, pkg *packages.Package, 
 		PackagePath: pkg.PkgPath,
 	}
 
+	for _, field := range typeExtra.Fields {
+		field.Parent = symbol
+	}
+	for _, method := range typeExtra.Methods {
+		method.Parent = symbol
+	}
+	symbol.Children = append(symbol.Children, typeExtra.Fields...)
+	symbol.Children = append(symbol.Children, typeExtra.Methods...)
+
 	symbols = append(symbols, symbol)
+	symbols = append(symbols, typeExtra.Fields...)
+	symbols = append(symbols, typeExtra.Methods...)
 	return symbols
 }
 

@@ -53,21 +53,20 @@ func ParseDiff(diffContent []byte) ([]FileDiff, error) {
 
 	var res []FileDiff
 	for _, d := range diffs {
-		// 如果文件被删除了,则跳过
-		if d.NewName == "/dev/null" {
-			continue
-		}
-
 		// 去掉前缀 a/ 或 b/
-		newName := strings.TrimPrefix(d.NewName, "b/")
+		rawNewName := strings.TrimPrefix(d.NewName, "b/")
+		newName := rawNewName
 		oldName := strings.TrimPrefix(d.OrigName, "a/")
+		if newName == "/dev/null" {
+			newName = oldName
+		}
 
 		fd := FileDiff{
 			Filename:      newName,
 			Hunks:         []HunkDiff{},
 			ChangedLines:  []int{},
 			IsNewFile:     oldName == "/dev/null",
-			IsDeletedFile: newName == "/dev/null",
+			IsDeletedFile: rawNewName == "/dev/null",
 		}
 
 		for _, h := range d.Hunks {
@@ -97,11 +96,16 @@ func ParseDiff(diffContent []byte) ([]FileDiff, error) {
 						LineNumber:  currentNewLineNum,
 						LineContent: line[1:], // 去掉 '+' 前缀
 					})
-					fd.ChangedLines = append(fd.ChangedLines, int(currentNewLineNum))
+					if !isCommentOnlyLine(line[1:]) {
+						fd.ChangedLines = append(fd.ChangedLines, int(currentNewLineNum))
+					}
 					currentNewLineNum++
 				} else if strings.HasPrefix(line, "-") {
-					// 删除行: 不影响新文件的行号,但记录为修改
-					// 注意: 这里我们主要关注新文件中的变更
+					// 删除行在新文件中没有直接行号；使用删除发生处的相邻新文件行号，
+					// 让纯删除变更仍能映射到包含该位置的符号。
+					if !isCommentOnlyLine(line[1:]) {
+						fd.ChangedLines = append(fd.ChangedLines, int(currentNewLineNum))
+					}
 					continue
 				} else if strings.HasPrefix(line, " ") || line == "" {
 					// 上下文行(空格开头)或空行: 在新文件中存在
@@ -125,6 +129,14 @@ func ParseDiff(diffContent []byte) ([]FileDiff, error) {
 	}
 
 	return res, nil
+}
+
+func isCommentOnlyLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "//") ||
+		strings.HasPrefix(trimmed, "/*") ||
+		strings.HasPrefix(trimmed, "*") ||
+		strings.HasPrefix(trimmed, "*/")
 }
 
 // GetChangedFiles 获取变更的文件列表

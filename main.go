@@ -98,9 +98,35 @@ func main() {
 		fmt.Printf("当前模块: %s\n", currentModule)
 	}
 
-	// 3. 初始化 LSP Impact Analyzer
+	// 3. 检测变更符号
 	if verbose {
-		fmt.Println("\n⏱️  步骤 3/6: 初始化 LSP 分析器 (gopls)...")
+		fmt.Println("\n⏱️  步骤 3/5: 检测变更符号...")
+	}
+	detectStart := time.Now()
+	cd := analyzer.NewChangeDetector(p, repoPath)
+	changes, err := cd.DetectChanges(oldCommit, newCommit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "检测变更失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if verbose {
+		fmt.Printf("   ✅ 检测到 %d 个变更符号 (耗时: %v)\n", len(changes), time.Since(detectStart))
+	}
+
+	var results []analyzer.AffectedBinary
+	if !analyzer.HasSupportedChanges(changes) {
+		if verbose {
+			fmt.Println("   ℹ️  没有可追踪的变更符号，跳过 gopls 初始化")
+		}
+		reporter := output.NewReporter(results)
+		printReport(reporter, outputType)
+		os.Exit(0)
+	}
+
+	// 4. 初始化 LSP Impact Analyzer
+	if verbose {
+		fmt.Println("\n⏱️  步骤 4/5: 初始化 LSP 分析器 (gopls)...")
 	}
 	lspStart := time.Now()
 	ctx := context.Background()
@@ -115,28 +141,12 @@ func main() {
 		fmt.Printf("   ✅ LSP 分析器初始化完成 (耗时: %v)\n", time.Since(lspStart))
 	}
 
-	// 4. 检测变更符号
-	if verbose {
-		fmt.Println("\n⏱️  步骤 4/6: 检测变更符号...")
-	}
-	detectStart := time.Now()
-	cd := analyzer.NewChangeDetector(p, repoPath)
-	changes, err := cd.DetectChanges(oldCommit, newCommit)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "检测变更失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	if verbose {
-		fmt.Printf("   ✅ 检测到 %d 个变更符号 (耗时: %v)\n", len(changes), time.Since(detectStart))
-	}
-
 	// 5. 分析影响
 	if verbose {
-		fmt.Println("\n⏱️  步骤 5/6: 追踪调用链到 main 函数...")
+		fmt.Println("\n⏱️  步骤 5/5: 追踪调用链到 main 函数...")
 	}
 	analyzeStart := time.Now()
-	results, err := lspAnalyzer.Analyze(changes)
+	results, err = lspAnalyzer.Analyze(changes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "分析失败: %v\n", err)
 		os.Exit(1)
@@ -149,10 +159,25 @@ func main() {
 
 	// 6. 输出结果
 	if verbose {
-		fmt.Println("\n⏱️  步骤 6/6: 输出结果...")
+		fmt.Println("\n输出结果...")
 	}
 	reporter := output.NewReporter(results)
+	printReport(reporter, outputType)
 
+	// 如果没有发现受影响的服务，返回非0退出码
+	if len(results) == 0 {
+		os.Exit(0) // 无影响也算成功
+	}
+
+	// 打印总耗时
+	if verbose {
+		fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("⏱️  总耗时: %v\n", time.Since(startTime))
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	}
+}
+
+func printReport(reporter *output.Reporter, outputType string) {
 	switch outputType {
 	case "json":
 		if err := reporter.PrintJSON(); err != nil {
@@ -170,18 +195,6 @@ func main() {
 		fallthrough
 	default:
 		reporter.PrintSimple()
-	}
-
-	// 如果没有发现受影响的服务，返回非0退出码
-	if len(results) == 0 {
-		os.Exit(0) // 无影响也算成功
-	}
-
-	// 打印总耗时
-	if verbose {
-		fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-		fmt.Printf("⏱️  总耗时: %v\n", time.Since(startTime))
-		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 	}
 }
 

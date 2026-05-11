@@ -3,7 +3,10 @@ package analyzer
 import (
 	"context"
 	"fmt"
-	"sync"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/jimyag/ripples/internal/lsp"
 	"github.com/jimyag/ripples/internal/parser"
@@ -37,16 +40,29 @@ func (a *LSPImpactAnalyzer) Close() error {
 func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, error) {
 	// Filter out unsupported symbols first
 	var supportedChanges []ChangedSymbol
+	seenChanges := make(map[string]bool)
 	for _, change := range changes {
-		if !isSupportedSymbolKind(change.Symbol.Kind) {
+		if !IsSupportedChange(change) {
 			if change.Symbol.Kind != parser.SymbolKindStruct &&
 				change.Symbol.Kind != parser.SymbolKindInterface &&
-				change.Symbol.Kind != parser.SymbolKindType {
-				fmt.Printf("Info: symbol kind %v not yet supported, skipping %s\n",
+				change.Symbol.Kind != parser.SymbolKindType &&
+				change.Symbol.Kind != parser.SymbolKindImport {
+				fmt.Fprintf(os.Stderr, "Info: symbol kind %v not yet supported, skipping %s\n",
 					change.Symbol.Kind, change.Symbol.Name)
 			}
 			continue
 		}
+		key := fmt.Sprintf("%s:%d:%d:%s:%s",
+			change.Symbol.Position.Filename,
+			change.Symbol.Position.Line,
+			change.Symbol.Position.Column,
+			change.Symbol.Kind,
+			change.Symbol.Name,
+		)
+		if seenChanges[key] {
+			continue
+		}
+		seenChanges[key] = true
 		supportedChanges = append(supportedChanges, change)
 	}
 
@@ -54,53 +70,34 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 		return nil, nil
 	}
 
-	// Concurrent processing
-	type traceResult struct {
-		paths []lsp.CallPath
-		err   error
-	}
-
-	results := make(chan traceResult, len(supportedChanges))
-	var wg sync.WaitGroup
-
-	// Process symbols concurrently
-	for _, change := range supportedChanges {
-		wg.Add(1)
-		go func(ch ChangedSymbol) {
-			defer wg.Done()
-
-			// Convert ChangedSymbol to parser.Symbol
-			symbol := &parser.Symbol{
-				Name:        ch.Symbol.Name,
-				Kind:        ch.Symbol.Kind,
-				Position:    ch.Symbol.Position,
-				PackagePath: ch.Symbol.PackagePath,
-				Extra:       ch.Symbol.Extra,
-			}
-
-			// Trace to main functions
-			paths, err := a.tracer.TraceToMain(symbol)
-			results <- traceResult{paths: paths, err: err}
-		}(change)
-	}
-
-	// Close results channel when all goroutines complete
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
 	// Collect results
 	var affectedBinaries []AffectedBinary
 	seenBinaries := make(map[string]bool)
 
-	for res := range results {
-		if res.err != nil {
-			fmt.Printf("Warning: failed to trace symbol: %v\n", res.err)
+	for _, change := range supportedChanges {
+		symbol := &parser.Symbol{
+			Name:        change.Symbol.Name,
+			Kind:        change.Symbol.Kind,
+			Position:    change.Symbol.Position,
+			PackagePath: change.Symbol.PackagePath,
+			Extra:       change.Symbol.Extra,
+		}
+		serviceID := serviceIdentifier(symbol.PackagePath)
+		if serviceID != "" && seenBinaries[serviceID] {
+			continue
+		}
+		if os.Getenv("RIPPLES_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: tracing %s %s at %s:%d:%d\n",
+				symbol.Kind, symbol.Name, symbol.Position.Filename, symbol.Position.Line, symbol.Position.Column)
+		}
+
+		paths, err := a.tracer.TraceToMain(symbol)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to trace symbol %s: %v\n", symbol.Name, err)
 			continue
 		}
 
-		for _, path := range res.paths {
+		for _, path := range paths {
 			if seenBinaries[path.BinaryName] {
 				continue
 			}
@@ -127,7 +124,7 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 
 			affectedBinaries = append(affectedBinaries, AffectedBinary{
 				Name:      path.BinaryName,
-				PkgPath:   extractPkgPath(path.MainURI),
+				PkgPath:   a.extractPkgPath(path.MainURI),
 				TracePath: pathStrs,
 			})
 		}
@@ -136,21 +133,106 @@ func (a *LSPImpactAnalyzer) Analyze(changes []ChangedSymbol) ([]AffectedBinary, 
 	return affectedBinaries, nil
 }
 
-// extractPkgPath extracts package path from URI
-func extractPkgPath(uri string) string {
-	return uri // TODO: implement proper extraction
+func serviceIdentifier(pkgPath string) string {
+	parts := strings.Split(pkgPath, "/")
+	for i, part := range parts {
+		if part == "internal" || part == "services" || part == "apps" || part == "api" {
+			if i+1 < len(parts) {
+				return parts[i+1]
+			}
+		}
+	}
+	return ""
 }
 
-// isSupportedSymbolKind checks if a symbol kind is supported for tracing
-func isSupportedSymbolKind(kind parser.SymbolKind) bool {
+// extractPkgPath extracts package path from a main file URI.
+func (a *LSPImpactAnalyzer) extractPkgPath(uri string) string {
+	filename := uri
+	if strings.HasPrefix(uri, "file://") {
+		parsed, err := url.Parse(uri)
+		if err == nil {
+			filename = parsed.Path
+		}
+	}
+
+	absRoot, err := filepath.Abs(a.rootPath)
+	if err != nil {
+		return uri
+	}
+
+	absFile, err := filepath.Abs(filename)
+	if err != nil {
+		return uri
+	}
+
+	rel, err := filepath.Rel(absRoot, filepath.Dir(absFile))
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return uri
+	}
+
+	modulePath := readModulePath(absRoot)
+	if modulePath == "" {
+		return filepath.ToSlash(rel)
+	}
+	if rel == "." {
+		return modulePath
+	}
+	return modulePath + "/" + filepath.ToSlash(rel)
+}
+
+// HasSupportedChanges reports whether at least one change can be traced.
+func HasSupportedChanges(changes []ChangedSymbol) bool {
+	for _, change := range changes {
+		if IsSupportedChange(change) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSupportedChange checks whether this concrete change can be traced.
+func IsSupportedChange(change ChangedSymbol) bool {
+	if change.Symbol.Kind == parser.SymbolKindImport {
+		extra, ok := change.Symbol.Extra.(parser.ImportExtra)
+		return ok && extra.IsBlankImport()
+	}
+	return IsSupportedSymbolKind(change.Symbol.Kind)
+}
+
+// IsSupportedSymbolKind checks if a symbol kind is supported for tracing.
+func IsSupportedSymbolKind(kind parser.SymbolKind) bool {
 	switch kind {
 	case parser.SymbolKindFunction,
 		parser.SymbolKindConstant,
 		parser.SymbolKindVariable,
+		parser.SymbolKindType,
+		parser.SymbolKindTypeAlias,
+		parser.SymbolKindStruct,
+		parser.SymbolKindStructField,
+		parser.SymbolKindInterface,
 		parser.SymbolKindInit,
 		parser.SymbolKindImport:
 		return true
 	default:
 		return false
 	}
+}
+
+func isSupportedSymbolKind(kind parser.SymbolKind) bool {
+	return IsSupportedSymbolKind(kind)
+}
+
+func readModulePath(rootPath string) string {
+	content, err := os.ReadFile(filepath.Join(rootPath, "go.mod"))
+	if err != nil {
+		return ""
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
+		}
+	}
+	return ""
 }

@@ -184,9 +184,9 @@ func TestIsSupportedSymbolKind(t *testing.T) {
 		{parser.SymbolKindFunction, true},
 		{parser.SymbolKindConstant, true},
 		{parser.SymbolKindVariable, true},
-		{parser.SymbolKindStruct, false},
-		{parser.SymbolKindInterface, false},
-		{parser.SymbolKindType, false},
+		{parser.SymbolKindStruct, true},
+		{parser.SymbolKindInterface, true},
+		{parser.SymbolKindType, true},
 		{parser.SymbolKindImport, true}, // Now supported (blank imports)
 	}
 

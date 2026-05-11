@@ -29,6 +29,6 @@ require (
 )
 
 // 使用 fork 的 golang-tools 以访问 gopls 内部 API
-replace golang.org/x/tools => github.com/jimyag/golang-tools v0.0.0-20251124095516-d87dcafefd00
+replace golang.org/x/tools => ../golang-tools
 
-replace golang.org/x/tools/gopls => github.com/jimyag/golang-tools/gopls v0.0.0-20251124095516-d87dcafefd00
+replace golang.org/x/tools/gopls => ../golang-tools/gopls
