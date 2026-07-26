@@ -48,6 +48,23 @@ func TestOpenRejectsUnknownRevision(t *testing.T) {
 	}
 }
 
+func TestResolveDoesNotExtractFiles(t *testing.T) {
+	repo := initRepository(t)
+	writeFile(t, filepath.Join(repo, "value.txt"), "value")
+	commit := commitAll(t, repo, "initial")
+
+	revision, err := Resolve(context.Background(), repo, "HEAD")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if revision.Commit != commit {
+		t.Fatalf("Resolve().Commit = %q, want %q", revision.Commit, commit)
+	}
+	if revision.Tree == "" {
+		t.Fatal("Resolve().Tree is empty")
+	}
+}
+
 func TestExtractTarIgnoresPAXMetadata(t *testing.T) {
 	var archive bytes.Buffer
 	writer := tar.NewWriter(&archive)

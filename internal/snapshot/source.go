@@ -20,8 +20,15 @@ type Source struct {
 	Dir      string
 }
 
-// Open resolves ref and extracts it without changing the repository worktree.
-func Open(ctx context.Context, repoPath, ref string) (*Source, error) {
+// Revision identifies an immutable Git tree.
+type Revision struct {
+	RepoPath string
+	Commit   string
+	Tree     string
+}
+
+// Resolve resolves a Git ref without changing the repository worktree.
+func Resolve(ctx context.Context, repoPath, ref string) (*Revision, error) {
 	repoPath, err := filepath.Abs(repoPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repository path: %w", err)
@@ -36,15 +43,33 @@ func Open(ctx context.Context, repoPath, ref string) (*Source, error) {
 		return nil, err
 	}
 
+	return &Revision{
+		RepoPath: repoPath,
+		Commit:   commit,
+		Tree:     tree,
+	}, nil
+}
+
+// Open resolves ref and extracts it without changing the repository worktree.
+func Open(ctx context.Context, repoPath, ref string) (*Source, error) {
+	revision, err := Resolve(ctx, repoPath, ref)
+	if err != nil {
+		return nil, err
+	}
+	return OpenRevision(ctx, revision)
+}
+
+// OpenRevision extracts a resolved revision.
+func OpenRevision(ctx context.Context, revision *Revision) (*Source, error) {
 	dir, err := os.MkdirTemp("", "ripples-snapshot-*")
 	if err != nil {
 		return nil, fmt.Errorf("create snapshot directory: %w", err)
 	}
 
 	source := &Source{
-		RepoPath: repoPath,
-		Commit:   commit,
-		Tree:     tree,
+		RepoPath: revision.RepoPath,
+		Commit:   revision.Commit,
+		Tree:     revision.Tree,
 		Dir:      dir,
 	}
 	if err := extractArchive(ctx, source); err != nil {
