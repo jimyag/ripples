@@ -535,6 +535,87 @@ func Start() {
 	})
 }
 
+func TestAnalyzeDoesNotJoinReplacedInterfaceCallChains(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runnera/runner.go", `package runnera
+
+type Service interface {
+	Run()
+}
+
+func Run(service Service) {
+	service.Run()
+}
+`)
+	writeModuleFile(t, repo, "runnerb/runner.go", `package runnerb
+
+type Service interface {
+	Run()
+}
+
+func Run(service Service) {
+	service.Run()
+}
+`)
+	writeModuleFile(t, repo, "servicea/service.go", `package servicea
+
+type Service struct{}
+
+func (Service) Run() { println("old") }
+`)
+	writeModuleFile(t, repo, "serviceb/service.go", `package serviceb
+
+type Service struct{}
+
+func (Service) Run() {}
+`)
+	writeModuleFile(t, repo, "feature/feature.go", `package feature
+
+import (
+	"example.com/app/runnera"
+	"example.com/app/servicea"
+)
+
+func Start() {
+	runnera.Run(servicea.Service{})
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/feature"
+
+func main() {
+	feature.Start()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "servicea/service.go", `package servicea
+
+type Service struct{}
+
+func (Service) Run() { println("new") }
+`)
+	writeModuleFile(t, repo, "feature/feature.go", `package feature
+
+import (
+	"example.com/app/runnerb"
+	"example.com/app/serviceb"
+)
+
+func Start() {
+	runnerb.Run(serviceb.Service{})
+}
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"cmd/server.main",
+		"feature.feature",
+		"runnera.runnera",
+		"servicea.servicea",
+	})
+}
+
 func TestAnalyzeDoesNotPropagateUnusedMethodThroughFactoryAndContainer(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "runner/runner.go", `package runner

@@ -222,13 +222,20 @@ func interfaceDependencies(
 			}
 			sort.Strings(tracedPackages)
 			for _, packagePath := range tracedPackages {
-				id := declaration.id + "::interface-trace::" + strconv.Itoa(index)
+				dependencies := sortedSet(traced[packagePath])
+				id := dispatchSymbolID(
+					declaration.id,
+					"interface-trace",
+					index,
+					packagePath,
+					dependencies,
+				)
 				index++
 				result = append(result, Symbol{
 					ID:           id,
 					PackagePath:  packagePath,
 					Hash:         stableMarkerHash("interface-trace"),
-					Dependencies: sortedSet(traced[packagePath]),
+					Dependencies: dependencies,
 				})
 			}
 		case *ast.SelectorExpr:
@@ -366,11 +373,18 @@ func dependencyInterfaceFallbackSymbols(
 	if len(fallback) == 0 {
 		return nil
 	}
+	dependencies := sortedSet(fallback)
 	return []Symbol{{
-		ID:           declaration.id + "::dependency-interface::" + strconv.Itoa(index),
+		ID: dispatchSymbolID(
+			declaration.id,
+			"dependency-interface",
+			index,
+			declaration.pkg.PkgPath,
+			dependencies,
+		),
 		PackagePath:  declaration.pkg.PkgPath,
 		Hash:         stableMarkerHash("dependency-interface"),
-		Dependencies: sortedSet(fallback),
+		Dependencies: dependencies,
 	}}
 }
 
@@ -1098,11 +1112,18 @@ func boundInterfaceSelectionSymbols(
 	if len(dependencies) == 0 {
 		return nil
 	}
+	sortedDependencies := sortedSet(dependencies)
 	return []Symbol{{
-		ID:           declaration.id + "::interface-selection::" + strconv.Itoa(index),
+		ID: dispatchSymbolID(
+			declaration.id,
+			"interface-selection",
+			index,
+			declaration.pkg.PkgPath,
+			sortedDependencies,
+		),
 		PackagePath:  declaration.pkg.PkgPath,
 		Hash:         stableMarkerHash("interface-selection"),
-		Dependencies: sortedSet(dependencies),
+		Dependencies: sortedDependencies,
 	}}
 }
 
@@ -1145,11 +1166,18 @@ func interfaceFieldBindingSymbols(
 	sort.Strings(packagePaths)
 	result := make([]Symbol, 0, len(packagePaths))
 	for offset, packagePath := range packagePaths {
+		dependencies := sortedSet(byPackage[packagePath])
 		result = append(result, Symbol{
-			ID:           declaration.id + "::interface-field::" + strconv.Itoa(index+offset),
+			ID: dispatchSymbolID(
+				declaration.id,
+				"interface-field",
+				index+offset,
+				packagePath,
+				dependencies,
+			),
 			PackagePath:  packagePath,
 			Hash:         stableMarkerHash("interface-field"),
-			Dependencies: sortedSet(byPackage[packagePath]),
+			Dependencies: dependencies,
 		})
 	}
 	return result
@@ -1682,4 +1710,17 @@ func packageInitID(packagePath string) string {
 func stableMarkerHash(value string) string {
 	hash := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(hash[:])
+}
+
+func dispatchSymbolID(
+	declarationID, kind string,
+	index int,
+	packagePath string,
+	dependencies []string,
+) string {
+	identity := packagePath + "\x00" + strings.Join(dependencies, "\x00")
+	return declarationID +
+		"::" + kind +
+		"::" + strconv.Itoa(index) +
+		"::" + stableMarkerHash(identity)
 }
