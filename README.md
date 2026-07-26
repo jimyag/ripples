@@ -81,7 +81,7 @@ RIPPLES_CACHE=/absolute/path/to/cache ./ripples ...
 - `GOOS`、`GOARCH`、`CGO_ENABLED`
 - `GOFLAGS`、`GOEXPERIMENT`
 
-package 内容摘要还包含已参与当前构建的 Go AST、embed 文件、其他编译输入、import graph，以及 `go.mod`/`go.work`。
+声明摘要还包含当前构建中的 Go AST、类型解析结果、embed 文件、其他编译输入、声明依赖图，以及 `go.mod`/`go.work`。
 
 ## 行为边界
 
