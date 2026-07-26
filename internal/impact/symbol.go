@@ -198,8 +198,24 @@ func interfaceDependencies(
 				fieldUses,
 				callResultUsed(declaration, typedNode, parents),
 			)
+			for _, fallback := range dependencyInterfaceFallbackSymbols(
+				declaration,
+				typedNode,
+				bindings,
+				packages,
+				objectIDs,
+				resolver,
+				traced,
+				index,
+			) {
+				index++
+				result = append(result, fallback)
+			}
 			tracedPackages := make([]string, 0, len(traced))
 			for packagePath := range traced {
+				if _, local := packages[packagePath]; !local {
+					continue
+				}
 				tracedPackages = append(tracedPackages, packagePath)
 			}
 			sort.Strings(tracedPackages)
@@ -296,6 +312,73 @@ func interfaceDependencies(
 		return true
 	})
 	return result
+}
+
+func dependencyInterfaceFallbackSymbols(
+	declaration symbolDeclaration,
+	call *ast.CallExpr,
+	bindings map[types.Object][]types.Type,
+	packages map[string]Package,
+	objectIDs map[types.Object]string,
+	resolver *valueFlowResolver,
+	traced map[string]map[string]struct{},
+	index int,
+) []Symbol {
+	function, _ := calledObject(declaration.pkg.TypesInfo, call.Fun).(*types.Func)
+	if function == nil || function.Pkg() == nil {
+		return nil
+	}
+	if _, local := packages[function.Pkg().Path()]; local {
+		return nil
+	}
+	signature, _ := function.Type().(*types.Signature)
+	if signature == nil {
+		return nil
+	}
+	tracedDependencies := make(map[string]struct{})
+	for _, dependencies := range traced {
+		for dependency := range dependencies {
+			tracedDependencies[dependency] = struct{}{}
+		}
+	}
+	fallback := make(map[string]struct{})
+	for argumentIndex, argument := range call.Args {
+		parameterType := callParameterType(signature, argumentIndex)
+		if parameterType == nil {
+			continue
+		}
+		iface, ok := parameterType.Underlying().(*types.Interface)
+		if !ok || iface.NumMethods() == 0 {
+			continue
+		}
+		for _, actualType := range resolver.expressionTypes(declaration.pkg, argument, bindings, 0) {
+			methods := concreteInterfaceMethods(actualType, iface, objectIDs)
+			if intersects(methods, tracedDependencies) {
+				continue
+			}
+			for _, method := range methods {
+				fallback[method] = struct{}{}
+			}
+		}
+	}
+	if len(fallback) == 0 {
+		return nil
+	}
+	return []Symbol{{
+		ID:           declaration.id + "::dependency-interface::" + strconv.Itoa(index),
+		PackagePath:  declaration.pkg.PkgPath,
+		Hash:         stableMarkerHash("dependency-interface"),
+		Dependencies: sortedSet(fallback),
+	}}
+}
+
+func intersects(values []string, set map[string]struct{}) bool {
+	for _, value := range values {
+		if _, exists := set[value]; exists {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeParents(root ast.Node) map[ast.Node]ast.Node {
@@ -1154,9 +1237,7 @@ func (tracer *interfaceCallTracer) traceFunction(
 
 	ast.Inspect(declaration.node, func(node ast.Node) bool {
 		if composite, ok := node.(*ast.CompositeLit); ok {
-			if tracer.traceFields {
-				tracer.traceCompositeLiteral(declaration, composite, bindings)
-			}
+			tracer.traceCompositeLiteral(declaration, composite, bindings)
 			return true
 		}
 		call, ok := node.(*ast.CallExpr)
@@ -1226,7 +1307,9 @@ func (tracer *interfaceCallTracer) traceCompositeLiteral(
 			continue
 		}
 		actualType := resolvedExpressionType(declaration.pkg, value, bindings)
-		tracer.addFieldBinding(structType.Field(fieldIndex), actualType)
+		if tracer.traceFields {
+			tracer.addFieldBinding(structType.Field(fieldIndex), actualType)
+		}
 	}
 }
 
@@ -1355,6 +1438,22 @@ func calledObject(info *types.Info, expression ast.Expr) types.Object {
 	default:
 		return nil
 	}
+}
+
+func concreteInterfaceMethods(
+	actualType types.Type,
+	iface *types.Interface,
+	objectIDs map[types.Object]string,
+) []string {
+	dependencies := make(map[string]struct{})
+	for methodIndex := range iface.NumMethods() {
+		required := iface.Method(methodIndex)
+		object, _, _ := types.LookupFieldOrMethod(actualType, true, required.Pkg(), required.Name())
+		if id, ok := objectIDs[object]; ok {
+			dependencies[id] = struct{}{}
+		}
+	}
+	return sortedSet(dependencies)
 }
 
 type symbolDeclaration struct {

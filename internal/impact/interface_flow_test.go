@@ -598,6 +598,108 @@ func (Service) Run() { println("new") }
 	})
 }
 
+func TestAnalyzePropagatesConcreteMethodThroughDependencyInterface(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "net/http"
+
+type Handler struct{}
+
+func (Handler) ServeHTTP(http.ResponseWriter, *http.Request) {
+	println("old")
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"net/http"
+
+	"example.com/app/service"
+)
+
+func main() {
+	_ = http.ListenAndServe(":0", service.Handler{})
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "net/http"
+
+type Handler struct{}
+
+func (Handler) ServeHTTP(http.ResponseWriter, *http.Request) {
+	println("new")
+}
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"cmd/server.main",
+		"service.service",
+	})
+}
+
+func TestAnalyzeTreatsDependencyInterfaceAsBlackBoxContract(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "go.mod", `module example.com/app
+
+go 1.25
+
+require example.com/dependency v0.0.0
+
+replace example.com/dependency => ./dependency
+`)
+	writeModuleFile(t, repo, "dependency/go.mod", `module example.com/dependency
+
+go 1.25
+`)
+	writeModuleFile(t, repo, "dependency/dependency.go", `package dependency
+
+type Service interface {
+	Used()
+	Unused()
+}
+
+func Run(service Service) {
+	service.Used()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Used() {}
+func (Service) Unused() { println("old") }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"example.com/app/service"
+	"example.com/dependency"
+)
+
+func main() {
+	dependency.Run(service.Service{})
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Used() {}
+func (Service) Unused() { println("new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"cmd/server.main",
+		"service.service",
+	})
+}
+
 func TestAnalyzePropagatesInterfaceVariableInitialization(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "runner/runner.go", `package runner
