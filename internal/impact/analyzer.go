@@ -6,11 +6,12 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-const analysisVersion = "symbol-impact-v9"
+const analysisVersion = "symbol-impact-v11"
 
 // Analyzer computes declaration-level impact between two Git revisions.
 type Analyzer struct {
@@ -124,6 +125,9 @@ func changedSymbols(oldSnapshot, newSnapshot *PackageSnapshot) map[string]struct
 
 	moduleChanged := oldSnapshot.ModuleHash != newSnapshot.ModuleHash
 	for id := range all {
+		if isDispatchSymbol(id) {
+			continue
+		}
 		oldSymbol, oldOK := oldSnapshot.Symbols[id]
 		newSymbol, newOK := newSnapshot.Symbols[id]
 		if moduleChanged || !oldOK || !newOK || oldSymbol.Hash != newSymbol.Hash {
@@ -131,6 +135,13 @@ func changedSymbols(oldSnapshot, newSnapshot *PackageSnapshot) map[string]struct
 		}
 	}
 	return changed
+}
+
+func isDispatchSymbol(id string) bool {
+	return strings.Contains(id, "::interface-trace::") ||
+		strings.Contains(id, "::interface-selection::") ||
+		strings.Contains(id, "::interface-field::") ||
+		strings.Contains(id, "::dependency-interface::")
 }
 
 func reverseDependencies(snapshots ...*PackageSnapshot) map[string]map[string]struct{} {

@@ -485,6 +485,56 @@ func (Service) Unused() { println("new") }
 	})
 }
 
+func TestAnalyzeDoesNotPropagateNewInterfaceCallToDependencies(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+
+func Run(service Service) {
+	service.Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() {}
+`)
+	writeModuleFile(t, repo, "feature/feature.go", `package feature
+
+func Start() {}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/feature"
+
+func main() {
+	feature.Start()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "feature/feature.go", `package feature
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func Start() {
+	runner.Run(service.Service{})
+}
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"cmd/server.main",
+		"feature.feature",
+	})
+}
+
 func TestAnalyzeDoesNotPropagateUnusedMethodThroughFactoryAndContainer(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "runner/runner.go", `package runner
@@ -780,6 +830,53 @@ func (Service) Run() { println("new") }
 
 	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
 		"cmd/server.main",
+		"service.service",
+	})
+}
+
+func TestAnalyzePropagatesAssignedInterfaceThroughFunction(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+
+func Run(service Service) {
+	service.Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() { println("old") }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	var current runner.Service
+	current = service.Service{}
+	runner.Run(current)
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() { println("new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"cmd/server.main",
+		"runner.runner",
 		"service.service",
 	})
 }
