@@ -88,7 +88,8 @@ package 内容摘要还包含已参与当前构建的 Go AST、embed 文件、�
 - 默认不分析 `_test.go`。
 - 只分析当前 `GOOS`、`GOARCH` 和 build tags 对应的构建配置。
 - 注释-only 变更不会产生受影响 package。
-- 新增和删除 package 分别使用 new 和 old import graph。
+- 无法由 AST 和类型信息唯一确定具体实现的接口、反射和高阶动态调用不会猜测传播。
+- 新增和删除声明分别使用 new 和 old 依赖图。
 - `go.mod` 或 `go.work` 变化按保守策略影响所有本地 package。
 - 输出只表示 Go package 影响；binary、service 和部署单元应由调用方继续映射。
 

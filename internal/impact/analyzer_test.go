@@ -188,6 +188,80 @@ func Used() string { return "used" }
 	assertPackages(t, got, []string{"shared.shared"})
 }
 
+func TestAnalyzeDoesNotMixCallbacksPassedToSharedFunction(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+func Run(callback func()) { callback() }
+`)
+	writeModuleFile(t, repo, "first/first.go", `package first
+
+import "example.com/app/runner"
+
+func callback() { println("old") }
+func Run() { runner.Run(callback) }
+`)
+	writeModuleFile(t, repo, "second/second.go", `package second
+
+import "example.com/app/runner"
+
+func callback() {}
+func Run() { runner.Run(callback) }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "first/first.go", `package first
+
+import "example.com/app/runner"
+
+func callback() { println("new") }
+func Run() { runner.Run(callback) }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"first.first",
+	})
+}
+
+func TestAnalyzePropagatesPackageInitializationChange(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "startup/startup.go", `package startup
+
+func setup() {}
+
+func init() { setup() }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import _ "example.com/app/startup"
+
+func main() {}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "startup/startup.go", `package startup
+
+func setup() { println("changed") }
+
+func init() { setup() }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"startup.startup",
+	})
+}
+
 func TestAnalyzeUsesOldGraphForDeletedPackage(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "legacy/legacy.go", `package legacy

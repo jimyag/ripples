@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"io"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	gopackages "golang.org/x/tools/go/packages"
 )
@@ -68,6 +70,7 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 			Hash:        pkg.Hash,
 		}
 	}
+	addInitializationDependencies(loaded, packages, objectIDs, symbols)
 	return symbols, nil
 }
 
@@ -261,4 +264,79 @@ func sortedSet(values map[string]struct{}) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func addInitializationDependencies(loaded []*gopackages.Package, packages map[string]Package, objectIDs map[types.Object]string, symbols map[string]Symbol) {
+	for _, pkg := range loaded {
+		if _, local := packages[pkg.PkgPath]; !local {
+			continue
+		}
+		dependencies := make(map[string]struct{})
+		initPrefix := pkg.PkgPath + "::init::"
+		for id := range symbols {
+			if strings.HasPrefix(id, initPrefix) {
+				dependencies[id] = struct{}{}
+			}
+		}
+		for importedPath := range pkg.Imports {
+			if _, local := packages[importedPath]; local {
+				dependencies[packageInitID(importedPath)] = struct{}{}
+			}
+		}
+		for _, file := range pkg.Syntax {
+			for _, declaration := range file.Decls {
+				gen, ok := declaration.(*ast.GenDecl)
+				if !ok || gen.Tok != token.VAR {
+					continue
+				}
+				for _, rawSpec := range gen.Specs {
+					spec := rawSpec.(*ast.ValueSpec)
+					if !hasInitializationEffect(spec.Values) {
+						continue
+					}
+					for _, name := range spec.Names {
+						if id, ok := objectIDs[pkg.TypesInfo.Defs[name]]; ok {
+							dependencies[id] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+		id := packageInitID(pkg.PkgPath)
+		symbols[id] = Symbol{
+			ID:           id,
+			PackagePath:  pkg.PkgPath,
+			Hash:         stableMarkerHash("package-init"),
+			Dependencies: sortedSet(dependencies),
+		}
+	}
+}
+
+func hasInitializationEffect(expressions []ast.Expr) bool {
+	hasEffect := false
+	for _, expression := range expressions {
+		ast.Inspect(expression, func(node ast.Node) bool {
+			switch typedNode := node.(type) {
+			case *ast.CallExpr:
+				hasEffect = true
+				return false
+			case *ast.UnaryExpr:
+				if typedNode.Op == token.ARROW {
+					hasEffect = true
+					return false
+				}
+			}
+			return !hasEffect
+		})
+	}
+	return hasEffect
+}
+
+func packageInitID(packagePath string) string {
+	return packagePath + "::package-init::$init"
+}
+
+func stableMarkerHash(value string) string {
+	hash := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(hash[:])
 }
