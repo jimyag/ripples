@@ -17,11 +17,16 @@ tasks:
   deps:
     desc: Install development tools
     cmds:
+      - task: lint-deps
+      - go install github.com/rhysd/actionlint/cmd/actionlint@latest
+      - go install github.com/goreleaser/goreleaser/v2@latest
+
+  lint-deps:
+    desc: Install lint tools
+    cmds:
       - go install honnef.co/go/tools/cmd/staticcheck@latest
       - go install mvdan.cc/gofumpt@latest
       - go install golang.org/x/tools/cmd/goimports@latest
-      - go install github.com/rhysd/actionlint/cmd/actionlint@latest
-      - go install github.com/goreleaser/goreleaser/v2@latest
 
   fmt:
     desc: Format Go source files
