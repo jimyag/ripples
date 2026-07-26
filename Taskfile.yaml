@@ -1,0 +1,81 @@
+version: "3"
+
+vars:
+  BINARY: ripples
+  OUTPUT_DIR: bin
+  LDFLAGS: "-s -w"
+  GO_FILES:
+    sh: git ls-files "*.go" ":!:testdata/**" | tr "\n" " "
+
+tasks:
+  default:
+    desc: List all tasks
+    cmds:
+      - task --list-all
+    silent: true
+
+  deps:
+    desc: Install development tools
+    cmds:
+      - go install honnef.co/go/tools/cmd/staticcheck@latest
+      - go install mvdan.cc/gofumpt@latest
+      - go install golang.org/x/tools/cmd/goimports@latest
+      - go install github.com/rhysd/actionlint/cmd/actionlint@latest
+      - go install github.com/goreleaser/goreleaser/v2@latest
+
+  fmt:
+    desc: Format Go source files
+    cmds:
+      - gofmt -w {{.GO_FILES}}
+      - gofumpt -w {{.GO_FILES}}
+      - goimports -w {{.GO_FILES}}
+
+  lint:
+    desc: Run static analysis and formatting checks
+    cmds:
+      - staticcheck ./...
+      - cmd: |
+          UNFORMATTED=$(gofmt -l {{.GO_FILES}})
+          if [ -n "$UNFORMATTED" ]; then
+            echo "unformatted files (run: task fmt):"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+      - cmd: |
+          UNFORMATTED=$(gofumpt -l {{.GO_FILES}})
+          if [ -n "$UNFORMATTED" ]; then
+            echo "unformatted files (run: task fmt):"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+      - cmd: |
+          UNFORMATTED=$(goimports -l {{.GO_FILES}})
+          if [ -n "$UNFORMATTED" ]; then
+            echo "unformatted files (run: task fmt):"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+      - go vet ./...
+
+  test:
+    desc: Run tests with race detection and coverage
+    cmds:
+      - GORACE=atexit_sleep_ms=0 go test -count=1 -trimpath -race -covermode=atomic -coverprofile=coverage.txt ./...
+
+  build:
+    desc: Build the ripples binary
+    cmds:
+      - mkdir -p {{.OUTPUT_DIR}}
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.OUTPUT_DIR}}/{{.BINARY}} .
+
+  ci:
+    desc: Run all continuous integration checks
+    cmds:
+      - task: lint
+      - task: test
+      - task: build
+
+  release-snapshot:
+    desc: Build a local snapshot release
+    cmds:
+      - goreleaser release --snapshot --clean

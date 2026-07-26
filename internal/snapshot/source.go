@@ -145,7 +145,7 @@ func extractTar(root string, reader io.Reader) error {
 			if err := os.MkdirAll(target, header.FileInfo().Mode().Perm()); err != nil {
 				return fmt.Errorf("create snapshot directory %s: %w", header.Name, err)
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("create snapshot parent %s: %w", header.Name, err)
 			}

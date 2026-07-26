@@ -95,5 +95,17 @@ package 内容摘要还包含已参与当前构建的 Go AST、embed 文件、�
 ## 开发
 
 ```bash
-go test ./...
+task deps
+task ci
+```
+
+常用任务：
+
+```bash
+task --list-all
+task fmt
+task lint
+task test
+task build
+task release-snapshot
 ```
