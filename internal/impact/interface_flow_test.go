@@ -7,6 +7,438 @@ import (
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
+func TestAnalyzePropagatesCommonInterfaceValueFlows(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  []string
+	}{
+		{
+			name: "factory return",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service {
+	return service.Service{}
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.New().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "forwarded return",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import "example.com/app/runner"
+
+func Forward(service runner.Service) runner.Service {
+	return service
+}
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/service"
+)
+
+func main() {
+	factory.Forward(service.Service{}).Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "closure capture",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	var current runner.Service = service.Service{}
+	run := func() {
+		current.Run()
+	}
+	run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "interface assertion",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	var current any = service.Service{}
+	current.(runner.Service).Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "slice range",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	services := []runner.Service{service.Service{}}
+	for _, current := range services {
+		current.Run()
+	}
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "map index",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	services := map[string]runner.Service{"primary": service.Service{}}
+	services["primary"].Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "conditional assignment",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	var current runner.Service
+	if len("x") > 0 {
+		current = service.Service{}
+	}
+	current.Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "multiple return values",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() (runner.Service, error) {
+	return service.Service{}, nil
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	current, _ := factory.New()
+	current.Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "named return value",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() (current runner.Service) {
+	current = service.Service{}
+	return
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.New().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "generic forwarding",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import "example.com/app/runner"
+
+func Forward[T runner.Service](service T) runner.Service {
+	return service
+}
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/service"
+)
+
+func main() {
+	factory.Forward(service.Service{}).Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "method value",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	var current runner.Service = service.Service{}
+	run := current.Run
+	run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "method expression",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	runner.Service.Run(service.Service{})
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "append and range",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	var services []runner.Service
+	services = append(services, service.Service{})
+	for _, current := range services {
+		current.Run()
+	}
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "map assignment",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	services := make(map[string]runner.Service)
+	services["primary"] = service.Service{}
+	services["primary"].Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "channel send and receive",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	services := make(chan runner.Service, 1)
+	services <- service.Service{}
+	current := <-services
+	current.Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function literal return",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	newService := func() runner.Service {
+		return service.Service{}
+	}
+	newService().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "type switch interface case",
+			files: map[string]string{
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	var value any = service.Service{}
+	switch current := value.(type) {
+	case runner.Service:
+		current.Run()
+	}
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "interface extracted from struct field",
+			files: map[string]string{
+				"holder/holder.go": `package holder
+
+import "example.com/app/runner"
+
+type Holder struct {
+	Current runner.Service
+}
+
+func New(current runner.Service) Holder {
+	return Holder{Current: current}
+}
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/holder"
+	"example.com/app/service"
+)
+
+func main() {
+	current := holder.New(service.Service{}).Current
+	current.Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+`)
+			writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() { println("old") }
+`)
+			for name, content := range test.files {
+				writeModuleFile(t, repo, name, content)
+			}
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() { println("new") }
+`)
+			newCommit := commitModule(t, repo, "new")
+
+			assertAnalyzedPackages(t, repo, oldCommit, newCommit, test.want)
+		})
+	}
+}
+
 func TestAnalyzeDoesNotPropagateUnusedConcreteInterfaceMethod(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "runner/runner.go", `package runner
@@ -50,6 +482,119 @@ func (Service) Unused() { println("new") }
 
 	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
 		"service.service",
+	})
+}
+
+func TestAnalyzeDoesNotPropagateUnusedMethodThroughFactoryAndContainer(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Used()
+	Unused()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Used() {}
+func (Service) Unused() { println("old") }
+`)
+	writeModuleFile(t, repo, "factory/factory.go", `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service {
+	return service.Service{}
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	services := []runner.Service{factory.New()}
+	services[0].Used()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Used() {}
+func (Service) Unused() { println("new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"service.service",
+	})
+}
+
+func TestAnalyzeDoesNotMixUnusedConstructorFieldBindings(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+`)
+	writeModuleFile(t, repo, "servicea/service.go", `package servicea
+
+type Service struct{}
+
+func (Service) Run() {}
+`)
+	writeModuleFile(t, repo, "serviceb/service.go", `package serviceb
+
+type Service struct{}
+
+func (Service) Run() { println("old") }
+`)
+	writeModuleFile(t, repo, "holder/holder.go", `package holder
+
+import "example.com/app/runner"
+
+type Holder struct {
+	Current runner.Service
+}
+
+func New(current runner.Service) Holder {
+	return Holder{Current: current}
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"example.com/app/holder"
+	"example.com/app/servicea"
+	"example.com/app/serviceb"
+)
+
+func main() {
+	holder.New(servicea.Service{}).Current.Run()
+	_ = holder.New(serviceb.Service{})
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "serviceb/service.go", `package serviceb
+
+type Service struct{}
+
+func (Service) Run() { println("new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"serviceb.serviceb",
 	})
 }
 

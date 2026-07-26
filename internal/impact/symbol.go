@@ -29,7 +29,12 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 	}
 	functions := functionDeclarations(declarations)
 	fieldUses := interfaceFieldUses(declarations)
-	globalBindings := packageInterfaceBindings(declarations)
+	resolver := valueFlowResolver{
+		functions:      functions,
+		functionValues: functionValueDeclarations(declarations),
+	}
+	globalBindings := packageInterfaceBindings(declarations, &resolver)
+	resolver.fieldBindings = packageFieldBindings(declarations, globalBindings, &resolver)
 
 	symbols := make(map[string]Symbol, len(declarations))
 	for _, declaration := range declarations {
@@ -64,6 +69,7 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 			functions,
 			fieldUses,
 			globalBindings,
+			&resolver,
 		)
 		for _, dispatch := range dispatchSymbols {
 			dependencies[dispatch.ID] = struct{}{}
@@ -107,6 +113,47 @@ func functionDeclarations(declarations []symbolDeclaration) map[*types.Func]symb
 	return result
 }
 
+func functionValueDeclarations(declarations []symbolDeclaration) map[types.Object]*ast.FuncLit {
+	result := make(map[types.Object]*ast.FuncLit)
+	for _, declaration := range declarations {
+		if declaration.node == nil {
+			continue
+		}
+		ast.Inspect(declaration.node, func(node ast.Node) bool {
+			switch typedNode := node.(type) {
+			case *ast.ValueSpec:
+				if len(typedNode.Names) != len(typedNode.Values) {
+					return true
+				}
+				for index, value := range typedNode.Values {
+					literal, ok := value.(*ast.FuncLit)
+					if ok {
+						result[declaration.pkg.TypesInfo.Defs[typedNode.Names[index]]] = literal
+					}
+				}
+			case *ast.AssignStmt:
+				if len(typedNode.Lhs) != len(typedNode.Rhs) {
+					return true
+				}
+				for index, value := range typedNode.Rhs {
+					literal, ok := value.(*ast.FuncLit)
+					identifier, identifierOK := typedNode.Lhs[index].(*ast.Ident)
+					if !ok || !identifierOK {
+						continue
+					}
+					object := declaration.pkg.TypesInfo.Defs[identifier]
+					if object == nil {
+						object = declaration.pkg.TypesInfo.Uses[identifier]
+					}
+					result[object] = literal
+				}
+			}
+			return true
+		})
+	}
+	return result
+}
+
 func interfaceDependencies(
 	declaration symbolDeclaration,
 	packages map[string]Package,
@@ -114,21 +161,43 @@ func interfaceDependencies(
 	functions map[*types.Func]symbolDeclaration,
 	fieldUses map[*types.Var][]interfaceMethodUse,
 	globalBindings map[types.Object][]types.Type,
+	resolver *valueFlowResolver,
 ) []Symbol {
 	var result []Symbol
 	if declaration.node == nil {
 		return result
 	}
-	bindings := declarationInterfaceBindings(declaration, globalBindings)
+	bindings := declarationInterfaceBindings(declaration, globalBindings, resolver)
+	parents := nodeParents(declaration.node)
 	index := 0
 	ast.Inspect(declaration.node, func(node ast.Node) bool {
 		switch typedNode := node.(type) {
 		case *ast.CallExpr:
-			for _, dispatch := range boundInterfaceCallSymbols(declaration, typedNode, bindings, objectIDs, index) {
-				index++
-				result = append(result, dispatch)
+			if selector, ok := typedNode.Fun.(*ast.SelectorExpr); ok {
+				selection := declaration.pkg.TypesInfo.Selections[selector]
+				if selection != nil && selection.Kind() == types.MethodExpr && len(typedNode.Args) > 0 {
+					for _, dispatch := range boundInterfaceSelectionSymbols(
+						declaration,
+						selector,
+						typedNode.Args[0],
+						bindings,
+						objectIDs,
+						resolver,
+						index,
+					) {
+						index++
+						result = append(result, dispatch)
+					}
+				}
 			}
-			traced := traceInterfaceCall(declaration, typedNode, functions, objectIDs, fieldUses)
+			traced := traceInterfaceCall(
+				declaration,
+				typedNode,
+				functions,
+				objectIDs,
+				fieldUses,
+				callResultUsed(declaration, typedNode, parents),
+			)
 			tracedPackages := make([]string, 0, len(traced))
 			for packagePath := range traced {
 				tracedPackages = append(tracedPackages, packagePath)
@@ -143,6 +212,23 @@ func interfaceDependencies(
 					Hash:         stableMarkerHash("interface-trace"),
 					Dependencies: sortedSet(traced[packagePath]),
 				})
+			}
+		case *ast.SelectorExpr:
+			selection := declaration.pkg.TypesInfo.Selections[typedNode]
+			if selection == nil || selection.Kind() == types.MethodExpr {
+				return true
+			}
+			for _, dispatch := range boundInterfaceSelectionSymbols(
+				declaration,
+				typedNode,
+				typedNode.X,
+				bindings,
+				objectIDs,
+				resolver,
+				index,
+			) {
+				index++
+				result = append(result, dispatch)
 			}
 		case *ast.CompositeLit:
 			structType, contextPackage := namedStruct(declaration.pkg.TypesInfo.TypeOf(typedNode))
@@ -164,7 +250,7 @@ func interfaceDependencies(
 				if fieldIndex < 0 || fieldIndex >= structType.NumFields() {
 					continue
 				}
-				actualTypes := concreteExpressionTypes(declaration.pkg, value, bindings)
+				actualTypes := resolver.expressionTypes(declaration.pkg, value, bindings, 0)
 				dispatches := interfaceFieldBindingSymbols(
 					declaration,
 					index,
@@ -192,7 +278,7 @@ func interfaceDependencies(
 				if field == nil || !field.IsField() {
 					continue
 				}
-				actualTypes := concreteExpressionTypes(declaration.pkg, typedNode.Rhs[assignmentIndex], bindings)
+				actualTypes := resolver.expressionTypes(declaration.pkg, typedNode.Rhs[assignmentIndex], bindings, 0)
 				dispatches := interfaceFieldBindingSymbols(
 					declaration,
 					index,
@@ -210,6 +296,77 @@ func interfaceDependencies(
 		return true
 	})
 	return result
+}
+
+func nodeParents(root ast.Node) map[ast.Node]ast.Node {
+	result := make(map[ast.Node]ast.Node)
+	var stack []ast.Node
+	ast.Inspect(root, func(node ast.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		if len(stack) > 0 {
+			result[node] = stack[len(stack)-1]
+		}
+		stack = append(stack, node)
+		return true
+	})
+	return result
+}
+
+func callResultUsed(
+	declaration symbolDeclaration,
+	call *ast.CallExpr,
+	parents map[ast.Node]ast.Node,
+) bool {
+	parent := parents[call]
+	switch typedParent := parent.(type) {
+	case *ast.ExprStmt:
+		return false
+	case *ast.AssignStmt:
+		for index, right := range typedParent.Rhs {
+			if right != call {
+				continue
+			}
+			if len(typedParent.Rhs) == 1 && len(typedParent.Lhs) > 1 {
+				for _, left := range typedParent.Lhs {
+					if identifier, ok := left.(*ast.Ident); ok && identifier.Name != "_" {
+						return objectIsUsed(declaration.pkg.TypesInfo, declaration.pkg.TypesInfo.Defs[identifier])
+					}
+				}
+				return false
+			}
+			if index >= len(typedParent.Lhs) {
+				return true
+			}
+			identifier, ok := typedParent.Lhs[index].(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if identifier.Name == "_" {
+				return false
+			}
+			object := declaration.pkg.TypesInfo.Defs[identifier]
+			if object == nil {
+				object = declaration.pkg.TypesInfo.Uses[identifier]
+			}
+			return objectIsUsed(declaration.pkg.TypesInfo, object)
+		}
+	}
+	return true
+}
+
+func objectIsUsed(info *types.Info, object types.Object) bool {
+	if object == nil {
+		return false
+	}
+	for _, used := range info.Uses {
+		if used == object {
+			return true
+		}
+	}
+	return false
 }
 
 type interfaceMethodUse struct {
@@ -255,7 +412,10 @@ func interfaceFieldUses(declarations []symbolDeclaration) map[*types.Var][]inter
 	return result
 }
 
-func packageInterfaceBindings(declarations []symbolDeclaration) map[types.Object][]types.Type {
+func packageInterfaceBindings(
+	declarations []symbolDeclaration,
+	resolver *valueFlowResolver,
+) map[types.Object][]types.Type {
 	result := make(map[types.Object][]types.Type)
 	for range 2 {
 		for _, declaration := range declarations {
@@ -263,7 +423,7 @@ func packageInterfaceBindings(declarations []symbolDeclaration) map[types.Object
 			if !ok {
 				continue
 			}
-			addValueSpecBindings(declaration.pkg, spec, result)
+			addValueSpecBindings(declaration.pkg, spec, result, resolver)
 		}
 	}
 	return result
@@ -272,6 +432,7 @@ func packageInterfaceBindings(declarations []symbolDeclaration) map[types.Object
 func declarationInterfaceBindings(
 	declaration symbolDeclaration,
 	global map[types.Object][]types.Type,
+	resolver *valueFlowResolver,
 ) map[types.Object][]types.Type {
 	result := make(map[types.Object][]types.Type, len(global))
 	for object, candidates := range global {
@@ -280,30 +441,144 @@ func declarationInterfaceBindings(
 	ast.Inspect(declaration.node, func(node ast.Node) bool {
 		switch typedNode := node.(type) {
 		case *ast.ValueSpec:
-			addValueSpecBindings(declaration.pkg, typedNode, result)
+			addValueSpecBindings(declaration.pkg, typedNode, result, resolver)
 		case *ast.AssignStmt:
-			if len(typedNode.Lhs) != len(typedNode.Rhs) {
-				return true
-			}
 			for index, left := range typedNode.Lhs {
-				identifier, ok := left.(*ast.Ident)
-				if !ok {
+				right, resultIndex := assignedExpression(typedNode.Rhs, index)
+				if right == nil {
 					continue
 				}
-				object := declaration.pkg.TypesInfo.Uses[identifier]
-				if object == nil {
-					object = declaration.pkg.TypesInfo.Defs[identifier]
-				}
-				addInterfaceBinding(
+				object := assignedObject(declaration.pkg.TypesInfo, left)
+				addValueBinding(
 					object,
 					declaration.pkg.TypesInfo.TypeOf(left),
-					concreteExpressionTypes(declaration.pkg, typedNode.Rhs[index], result),
+					resolver.expressionTypes(declaration.pkg, right, result, resultIndex),
 					result,
 				)
 			}
+		case *ast.RangeStmt:
+			identifier, _ := typedNode.Value.(*ast.Ident)
+			if identifier == nil {
+				return true
+			}
+			object := declaration.pkg.TypesInfo.Defs[identifier]
+			if object == nil {
+				object = declaration.pkg.TypesInfo.Uses[identifier]
+			}
+			addValueBinding(
+				object,
+				declaration.pkg.TypesInfo.TypeOf(identifier),
+				resolver.expressionTypes(declaration.pkg, typedNode.X, result, 0),
+				result,
+			)
+		case *ast.TypeSwitchStmt:
+			assertion := typeSwitchAssertion(typedNode.Assign)
+			if assertion == nil {
+				return true
+			}
+			candidates := resolver.expressionTypes(declaration.pkg, assertion.X, result, 0)
+			for _, statement := range typedNode.Body.List {
+				caseClause, _ := statement.(*ast.CaseClause)
+				if caseClause == nil {
+					continue
+				}
+				object, _ := declaration.pkg.TypesInfo.Implicits[caseClause].(*types.Var)
+				if object == nil {
+					continue
+				}
+				addValueBinding(object, object.Type(), candidates, result)
+			}
+		case *ast.SendStmt:
+			object := assignedObject(declaration.pkg.TypesInfo, typedNode.Chan)
+			addValueBinding(
+				object,
+				declaration.pkg.TypesInfo.TypeOf(typedNode.Chan),
+				resolver.expressionTypes(declaration.pkg, typedNode.Value, result, 0),
+				result,
+			)
 		}
 		return true
 	})
+	return result
+}
+
+func typeSwitchAssertion(statement ast.Stmt) *ast.TypeAssertExpr {
+	var expression ast.Expr
+	switch typedStatement := statement.(type) {
+	case *ast.AssignStmt:
+		if len(typedStatement.Rhs) == 1 {
+			expression = typedStatement.Rhs[0]
+		}
+	case *ast.ExprStmt:
+		expression = typedStatement.X
+	}
+	assertion, _ := expression.(*ast.TypeAssertExpr)
+	return assertion
+}
+
+func packageFieldBindings(
+	declarations []symbolDeclaration,
+	global map[types.Object][]types.Type,
+	resolver *valueFlowResolver,
+) map[types.Object][]types.Type {
+	result := make(map[types.Object][]types.Type)
+	resolver.fieldBindings = result
+	for range 2 {
+		for _, declaration := range declarations {
+			if declaration.node == nil {
+				continue
+			}
+			bindings := declarationInterfaceBindings(declaration, global, resolver)
+			ast.Inspect(declaration.node, func(node ast.Node) bool {
+				switch typedNode := node.(type) {
+				case *ast.CompositeLit:
+					structType, _ := namedStruct(declaration.pkg.TypesInfo.TypeOf(typedNode))
+					if structType == nil {
+						return true
+					}
+					for index, element := range typedNode.Elts {
+						fieldIndex := index
+						value := ast.Expr(element)
+						if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
+							value = keyValue.Value
+							key, _ := keyValue.Key.(*ast.Ident)
+							field, _ := declaration.pkg.TypesInfo.Uses[key].(*types.Var)
+							fieldIndex = structFieldIndex(structType, field)
+						}
+						if fieldIndex < 0 || fieldIndex >= structType.NumFields() {
+							continue
+						}
+						field := structType.Field(fieldIndex)
+						addValueBinding(
+							field,
+							field.Type(),
+							resolver.expressionTypes(declaration.pkg, value, bindings, 0),
+							result,
+						)
+					}
+				case *ast.AssignStmt:
+					for index, left := range typedNode.Lhs {
+						selector, ok := left.(*ast.SelectorExpr)
+						if !ok {
+							continue
+						}
+						field, _ := selectionObject(declaration.pkg.TypesInfo.Selections[selector]).(*types.Var)
+						right, resultIndex := assignedExpression(typedNode.Rhs, index)
+						if field == nil || right == nil {
+							continue
+						}
+						addValueBinding(
+							field,
+							field.Type(),
+							resolver.expressionTypes(declaration.pkg, right, bindings, resultIndex),
+							result,
+						)
+					}
+				}
+				return true
+			})
+		}
+	}
 	return result
 }
 
@@ -311,22 +586,51 @@ func addValueSpecBindings(
 	pkg *gopackages.Package,
 	spec *ast.ValueSpec,
 	bindings map[types.Object][]types.Type,
+	resolver *valueFlowResolver,
 ) {
-	if len(spec.Names) != len(spec.Values) {
-		return
-	}
 	for index, name := range spec.Names {
+		value, resultIndex := assignedExpression(spec.Values, index)
+		if value == nil {
+			continue
+		}
 		object := pkg.TypesInfo.Defs[name]
-		addInterfaceBinding(
+		addValueBinding(
 			object,
 			pkg.TypesInfo.TypeOf(name),
-			concreteExpressionTypes(pkg, spec.Values[index], bindings),
+			resolver.expressionTypes(pkg, value, bindings, resultIndex),
 			bindings,
 		)
 	}
 }
 
-func addInterfaceBinding(
+func assignedExpression(expressions []ast.Expr, index int) (ast.Expr, int) {
+	if index < len(expressions) {
+		return expressions[index], 0
+	}
+	if len(expressions) == 1 {
+		return expressions[0], index
+	}
+	return nil, 0
+}
+
+func assignedObject(info *types.Info, expression ast.Expr) types.Object {
+	switch typedExpression := expression.(type) {
+	case *ast.Ident:
+		object := info.Uses[typedExpression]
+		if object == nil {
+			object = info.Defs[typedExpression]
+		}
+		return object
+	case *ast.IndexExpr:
+		return assignedObject(info, typedExpression.X)
+	case *ast.ParenExpr:
+		return assignedObject(info, typedExpression.X)
+	default:
+		return nil
+	}
+}
+
+func addValueBinding(
 	object types.Object,
 	targetType types.Type,
 	candidates []types.Type,
@@ -335,12 +639,19 @@ func addInterfaceBinding(
 	if object == nil || targetType == nil {
 		return
 	}
-	iface, ok := targetType.Underlying().(*types.Interface)
-	if !ok || iface.NumMethods() == 0 {
-		return
+	acceptedType := targetType
+	switch underlying := targetType.Underlying().(type) {
+	case *types.Slice:
+		acceptedType = underlying.Elem()
+	case *types.Array:
+		acceptedType = underlying.Elem()
+	case *types.Map:
+		acceptedType = underlying.Elem()
+	case *types.Chan:
+		acceptedType = underlying.Elem()
 	}
 	for _, candidate := range candidates {
-		if types.AssignableTo(candidate, targetType) {
+		if types.AssignableTo(candidate, acceptedType) {
 			bindings[object] = appendUniqueType(bindings[object], candidate)
 		}
 	}
@@ -356,20 +667,104 @@ func appendUniqueType(existing []types.Type, candidate types.Type) []types.Type 
 	return append(existing, candidate)
 }
 
-func concreteExpressionTypes(
+type valueFlowResolver struct {
+	functions      map[*types.Func]symbolDeclaration
+	functionValues map[types.Object]*ast.FuncLit
+	fieldBindings  map[types.Object][]types.Type
+	resolving      map[string]struct{}
+}
+
+func (resolver *valueFlowResolver) expressionTypes(
 	pkg *gopackages.Package,
 	expression ast.Expr,
 	bindings map[types.Object][]types.Type,
+	resultIndex int,
 ) []types.Type {
 	switch typedExpression := expression.(type) {
 	case *ast.Ident:
-		if candidates := bindings[pkg.TypesInfo.Uses[typedExpression]]; len(candidates) > 0 {
+		object := pkg.TypesInfo.Uses[typedExpression]
+		if object == nil {
+			object = pkg.TypesInfo.Defs[typedExpression]
+		}
+		if candidates := bindings[object]; len(candidates) > 0 {
 			return candidates
 		}
 	case *ast.ParenExpr:
-		return concreteExpressionTypes(pkg, typedExpression.X, bindings)
+		return resolver.expressionTypes(pkg, typedExpression.X, bindings, resultIndex)
+	case *ast.TypeAssertExpr:
+		asserted := pkg.TypesInfo.TypeOf(typedExpression)
+		if asserted == nil {
+			return nil
+		}
+		if _, isInterface := asserted.Underlying().(*types.Interface); !isInterface {
+			return []types.Type{asserted}
+		}
+		var result []types.Type
+		for _, candidate := range resolver.expressionTypes(pkg, typedExpression.X, bindings, 0) {
+			if types.AssignableTo(candidate, asserted) {
+				result = appendUniqueType(result, candidate)
+			}
+		}
+		return result
+	case *ast.SelectorExpr:
+		field, _ := selectionObject(pkg.TypesInfo.Selections[typedExpression]).(*types.Var)
+		if call, ok := typedExpression.X.(*ast.CallExpr); ok {
+			if candidates := resolver.callFieldTypes(pkg, call, field, bindings); len(candidates) > 0 {
+				return candidates
+			}
+		}
+		if candidates := resolver.fieldBindings[field]; len(candidates) > 0 {
+			return candidates
+		}
+	case *ast.IndexExpr:
+		return resolver.expressionTypes(pkg, typedExpression.X, bindings, 0)
+	case *ast.IndexListExpr:
+		return resolver.expressionTypes(pkg, typedExpression.X, bindings, 0)
+	case *ast.UnaryExpr:
+		if typedExpression.Op == token.ARROW {
+			return resolver.expressionTypes(pkg, typedExpression.X, bindings, 0)
+		}
+	case *ast.CompositeLit:
+		typ := pkg.TypesInfo.TypeOf(typedExpression)
+		if typ == nil {
+			return nil
+		}
+		switch typ.Underlying().(type) {
+		case *types.Slice, *types.Array, *types.Map:
+			var result []types.Type
+			for _, element := range typedExpression.Elts {
+				value := ast.Expr(element)
+				if keyValue, ok := element.(*ast.KeyValueExpr); ok {
+					value = keyValue.Value
+				}
+				for _, candidate := range resolver.expressionTypes(pkg, value, bindings, 0) {
+					result = appendUniqueType(result, candidate)
+				}
+			}
+			return result
+		}
+	case *ast.CallExpr:
+		if identifier, ok := typedExpression.Fun.(*ast.Ident); ok && identifier.Name == "append" && len(typedExpression.Args) > 0 {
+			var result []types.Type
+			for _, argument := range typedExpression.Args {
+				for _, candidate := range resolver.expressionTypes(pkg, argument, bindings, 0) {
+					result = appendUniqueType(result, candidate)
+				}
+			}
+			return result
+		}
+		if result := resolver.callResultTypes(pkg, typedExpression, bindings, resultIndex); len(result) > 0 {
+			return result
+		}
 	}
 	typ := pkg.TypesInfo.TypeOf(expression)
+	if tuple, ok := typ.(*types.Tuple); ok {
+		if resultIndex >= 0 && resultIndex < tuple.Len() {
+			typ = tuple.At(resultIndex).Type()
+		} else {
+			return nil
+		}
+	}
 	if typ == nil {
 		return nil
 	}
@@ -379,17 +774,227 @@ func concreteExpressionTypes(
 	return []types.Type{typ}
 }
 
-func boundInterfaceCallSymbols(
-	declaration symbolDeclaration,
+func (resolver *valueFlowResolver) callFieldTypes(
+	caller *gopackages.Package,
 	call *ast.CallExpr,
-	bindings map[types.Object][]types.Type,
-	objectIDs map[types.Object]string,
-	index int,
-) []Symbol {
-	selector, ok := call.Fun.(*ast.SelectorExpr)
+	field *types.Var,
+	current map[types.Object][]types.Type,
+) []types.Type {
+	if field == nil {
+		return nil
+	}
+	function, _ := calledObject(caller.TypesInfo, call.Fun).(*types.Func)
+	declaration, ok := resolver.functions[function]
 	if !ok {
 		return nil
 	}
+	signature, _ := function.Type().(*types.Signature)
+	functionNode, _ := declaration.node.(*ast.FuncDecl)
+	if signature == nil || functionNode == nil {
+		return nil
+	}
+	bindings := resolver.callBindings(caller, call, signature, current)
+	bindings = declarationInterfaceBindings(declaration, bindings, resolver)
+	var result []types.Type
+	ast.Inspect(functionNode.Body, func(node ast.Node) bool {
+		if _, nested := node.(*ast.FuncLit); nested {
+			return false
+		}
+		returnStatement, ok := node.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, expression := range returnStatement.Results {
+			composite, _ := expression.(*ast.CompositeLit)
+			if composite == nil {
+				continue
+			}
+			structType, _ := namedStruct(declaration.pkg.TypesInfo.TypeOf(composite))
+			if structType == nil {
+				continue
+			}
+			for index, element := range composite.Elts {
+				fieldIndex := index
+				value := ast.Expr(element)
+				if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
+					value = keyValue.Value
+					key, _ := keyValue.Key.(*ast.Ident)
+					keyField, _ := declaration.pkg.TypesInfo.Uses[key].(*types.Var)
+					fieldIndex = structFieldIndex(structType, keyField)
+				}
+				if fieldIndex < 0 || fieldIndex >= structType.NumFields() || structType.Field(fieldIndex) != field {
+					continue
+				}
+				for _, candidate := range resolver.expressionTypes(declaration.pkg, value, bindings, 0) {
+					result = appendUniqueType(result, candidate)
+				}
+			}
+		}
+		return true
+	})
+	return result
+}
+
+func (resolver *valueFlowResolver) callResultTypes(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	current map[types.Object][]types.Type,
+	resultIndex int,
+) []types.Type {
+	if literal, ok := call.Fun.(*ast.FuncLit); ok {
+		signature, _ := caller.TypesInfo.TypeOf(literal).(*types.Signature)
+		if signature == nil {
+			return nil
+		}
+		bindings := resolver.callBindings(caller, call, signature, current)
+		return resolver.returnTypes(caller, literal.Body, signature, bindings, resultIndex)
+	}
+	if identifier, ok := call.Fun.(*ast.Ident); ok {
+		object := caller.TypesInfo.Uses[identifier]
+		if object == nil {
+			object = caller.TypesInfo.Defs[identifier]
+		}
+		if literal := resolver.functionValues[object]; literal != nil {
+			signature, _ := caller.TypesInfo.TypeOf(literal).(*types.Signature)
+			if signature == nil {
+				return nil
+			}
+			bindings := make(map[types.Object][]types.Type, len(current))
+			for currentObject, candidates := range current {
+				bindings[currentObject] = append([]types.Type(nil), candidates...)
+			}
+			for parameter, candidates := range resolver.callBindings(caller, call, signature, current) {
+				bindings[parameter] = appendUniqueTypes(bindings[parameter], candidates)
+			}
+			return resolver.returnTypes(caller, literal.Body, signature, bindings, resultIndex)
+		}
+	}
+
+	function, _ := calledObject(caller.TypesInfo, call.Fun).(*types.Func)
+	declaration, ok := resolver.functions[function]
+	if !ok {
+		return nil
+	}
+	signature, _ := function.Type().(*types.Signature)
+	if signature == nil || resultIndex < 0 || resultIndex >= signature.Results().Len() {
+		return nil
+	}
+	bindings := resolver.callBindings(caller, call, signature, current)
+	key := function.FullName() + bindingCandidatesKey(bindings) + "::" + strconv.Itoa(resultIndex)
+	if resolver.resolving == nil {
+		resolver.resolving = make(map[string]struct{})
+	}
+	if _, active := resolver.resolving[key]; active {
+		return nil
+	}
+	resolver.resolving[key] = struct{}{}
+	defer delete(resolver.resolving, key)
+
+	bindings = declarationInterfaceBindings(declaration, bindings, resolver)
+	functionNode, _ := declaration.node.(*ast.FuncDecl)
+	if functionNode == nil {
+		return nil
+	}
+	return resolver.returnTypes(declaration.pkg, functionNode.Body, signature, bindings, resultIndex)
+}
+
+func appendUniqueTypes(existing, candidates []types.Type) []types.Type {
+	for _, candidate := range candidates {
+		existing = appendUniqueType(existing, candidate)
+	}
+	return existing
+}
+
+func (resolver *valueFlowResolver) callBindings(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	signature *types.Signature,
+	current map[types.Object][]types.Type,
+) map[types.Object][]types.Type {
+	result := make(map[types.Object][]types.Type)
+	for index, argument := range call.Args {
+		parameterIndex := index
+		if signature.Variadic() && parameterIndex >= signature.Params().Len() {
+			parameterIndex = signature.Params().Len() - 1
+		}
+		if parameterIndex < 0 || parameterIndex >= signature.Params().Len() {
+			continue
+		}
+		parameter := signature.Params().At(parameterIndex)
+		for _, candidate := range resolver.expressionTypes(caller, argument, current, 0) {
+			result[parameter] = appendUniqueType(result[parameter], candidate)
+		}
+	}
+	if signature.Recv() != nil {
+		if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
+			for _, candidate := range resolver.expressionTypes(caller, selector.X, current, 0) {
+				result[signature.Recv()] = appendUniqueType(result[signature.Recv()], candidate)
+			}
+		}
+	}
+	return result
+}
+
+func (resolver *valueFlowResolver) returnTypes(
+	pkg *gopackages.Package,
+	body *ast.BlockStmt,
+	signature *types.Signature,
+	bindings map[types.Object][]types.Type,
+	resultIndex int,
+) []types.Type {
+	if body == nil || resultIndex < 0 || resultIndex >= signature.Results().Len() {
+		return nil
+	}
+	var result []types.Type
+	ast.Inspect(body, func(node ast.Node) bool {
+		if _, nested := node.(*ast.FuncLit); nested {
+			return false
+		}
+		returnStatement, ok := node.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		if len(returnStatement.Results) == 0 {
+			for _, candidate := range bindings[signature.Results().At(resultIndex)] {
+				result = appendUniqueType(result, candidate)
+			}
+			return true
+		}
+		expression, nestedResult := assignedExpression(returnStatement.Results, resultIndex)
+		if expression == nil {
+			return true
+		}
+		for _, candidate := range resolver.expressionTypes(pkg, expression, bindings, nestedResult) {
+			result = appendUniqueType(result, candidate)
+		}
+		return true
+	})
+	return result
+}
+
+func bindingCandidatesKey(bindings map[types.Object][]types.Type) string {
+	parts := make([]string, 0, len(bindings))
+	for object, candidates := range bindings {
+		typesForObject := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			typesForObject = append(typesForObject, types.TypeString(candidate, packageQualifier))
+		}
+		sort.Strings(typesForObject)
+		parts = append(parts, object.Name()+"="+strings.Join(typesForObject, "|"))
+	}
+	sort.Strings(parts)
+	return "::" + strings.Join(parts, ",")
+}
+
+func boundInterfaceSelectionSymbols(
+	declaration symbolDeclaration,
+	selector *ast.SelectorExpr,
+	receiver ast.Expr,
+	bindings map[types.Object][]types.Type,
+	objectIDs map[types.Object]string,
+	resolver *valueFlowResolver,
+	index int,
+) []Symbol {
 	selection := declaration.pkg.TypesInfo.Selections[selector]
 	required, _ := selectionObject(selection).(*types.Func)
 	if required == nil {
@@ -399,7 +1004,7 @@ func boundInterfaceCallSymbols(
 		return nil
 	}
 	dependencies := make(map[string]struct{})
-	for _, actualType := range concreteExpressionTypes(declaration.pkg, selector.X, bindings) {
+	for _, actualType := range resolver.expressionTypes(declaration.pkg, receiver, bindings, 0) {
 		method, _, _ := types.LookupFieldOrMethod(actualType, true, required.Pkg(), required.Name())
 		if id, exists := objectIDs[method]; exists {
 			dependencies[id] = struct{}{}
@@ -409,9 +1014,9 @@ func boundInterfaceCallSymbols(
 		return nil
 	}
 	return []Symbol{{
-		ID:           declaration.id + "::interface-call::" + strconv.Itoa(index),
+		ID:           declaration.id + "::interface-selection::" + strconv.Itoa(index),
 		PackagePath:  declaration.pkg.PkgPath,
-		Hash:         stableMarkerHash("interface-call"),
+		Hash:         stableMarkerHash("interface-selection"),
 		Dependencies: sortedSet(dependencies),
 	}}
 }
@@ -497,12 +1102,13 @@ func structFieldIndex(structType *types.Struct, field *types.Var) int {
 }
 
 type interfaceCallTracer struct {
-	functions map[*types.Func]symbolDeclaration
-	objectIDs map[types.Object]string
-	fieldUses map[*types.Var][]interfaceMethodUse
-	visited   map[string]struct{}
-	byPackage map[string]map[string]struct{}
-	active    []string
+	functions   map[*types.Func]symbolDeclaration
+	objectIDs   map[types.Object]string
+	fieldUses   map[*types.Var][]interfaceMethodUse
+	visited     map[string]struct{}
+	byPackage   map[string]map[string]struct{}
+	active      []string
+	traceFields bool
 }
 
 func traceInterfaceCall(
@@ -511,6 +1117,7 @@ func traceInterfaceCall(
 	functions map[*types.Func]symbolDeclaration,
 	objectIDs map[types.Object]string,
 	fieldUses map[*types.Var][]interfaceMethodUse,
+	traceFields bool,
 ) map[string]map[string]struct{} {
 	function, _ := calledObject(caller.pkg.TypesInfo, call.Fun).(*types.Func)
 	declaration, ok := functions[function]
@@ -522,12 +1129,13 @@ func traceInterfaceCall(
 		return nil
 	}
 	tracer := interfaceCallTracer{
-		functions: functions,
-		objectIDs: objectIDs,
-		fieldUses: fieldUses,
-		visited:   make(map[string]struct{}),
-		byPackage: make(map[string]map[string]struct{}),
-		active:    []string{declaration.pkg.PkgPath},
+		functions:   functions,
+		objectIDs:   objectIDs,
+		fieldUses:   fieldUses,
+		visited:     make(map[string]struct{}),
+		byPackage:   make(map[string]map[string]struct{}),
+		active:      []string{declaration.pkg.PkgPath},
+		traceFields: traceFields,
 	}
 	tracer.traceFunction(declaration, function, bindings)
 	return tracer.byPackage
@@ -546,7 +1154,9 @@ func (tracer *interfaceCallTracer) traceFunction(
 
 	ast.Inspect(declaration.node, func(node ast.Node) bool {
 		if composite, ok := node.(*ast.CompositeLit); ok {
-			tracer.traceCompositeLiteral(declaration, composite, bindings)
+			if tracer.traceFields {
+				tracer.traceCompositeLiteral(declaration, composite, bindings)
+			}
 			return true
 		}
 		call, ok := node.(*ast.CallExpr)
@@ -745,18 +1355,6 @@ func calledObject(info *types.Info, expression ast.Expr) types.Object {
 	default:
 		return nil
 	}
-}
-
-func concreteInterfaceMethods(actualType types.Type, iface *types.Interface, objectIDs map[types.Object]string) []string {
-	dependencies := make(map[string]struct{})
-	for methodIndex := range iface.NumMethods() {
-		required := iface.Method(methodIndex)
-		object, _, _ := types.LookupFieldOrMethod(actualType, true, required.Pkg(), required.Name())
-		if id, ok := objectIDs[object]; ok {
-			dependencies[id] = struct{}{}
-		}
-	}
-	return sortedSet(dependencies)
 }
 
 type symbolDeclaration struct {
