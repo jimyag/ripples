@@ -76,6 +76,9 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 			Hash:        pkg.Hash,
 		}
 	}
+	if err := addEmbedDependencies(root, loaded, packages, objectIDs, symbols); err != nil {
+		return nil, err
+	}
 	addInitializationDependencies(loaded, packages, objectIDs, symbols)
 	return symbols, nil
 }

@@ -504,6 +504,83 @@ func init() { setup() }
 	})
 }
 
+func TestAnalyzePropagatesEmbeddedFileChange(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "resource/data.txt", "old")
+	writeModuleFile(t, repo, "resource/resource.go", `package resource
+
+import _ "embed"
+
+//go:embed data.txt
+var data string
+
+func Value() string { return data }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/resource"
+
+func main() { println(resource.Value()) }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "resource/data.txt", "new")
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"resource.resource",
+	})
+}
+
+func TestAnalyzeDoesNotMixIndependentEmbeddedFiles(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "resource/a.txt", "old")
+	writeModuleFile(t, repo, "resource/b.txt", "stable")
+	writeModuleFile(t, repo, "resource/resource.go", `package resource
+
+import _ "embed"
+
+//go:embed a.txt
+var a string
+
+//go:embed b.txt
+var b string
+
+func A() string { return a }
+func B() string { return b }
+`)
+	writeModuleFile(t, repo, "cmd/a/main.go", `package main
+
+import "example.com/app/resource"
+
+func main() { println(resource.A()) }
+`)
+	writeModuleFile(t, repo, "cmd/b/main.go", `package main
+
+import "example.com/app/resource"
+
+func main() { println(resource.B()) }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "resource/a.txt", "new")
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/a.main",
+		"resource.resource",
+	})
+}
+
 func TestAnalyzeUsesOldGraphForDeletedPackage(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "legacy/legacy.go", `package legacy
