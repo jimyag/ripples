@@ -109,3 +109,13 @@ task test
 task build
 task release-snapshot
 ```
+
+## 发布
+
+推送 `v*` tag 后，GitHub Actions 会通过 GoReleaser 创建 Release，并上传 Linux、macOS 和 Windows 的 amd64/arm64 二进制归档及校验文件。
+
+发布前可以在本地验证：
+
+```bash
+task release-snapshot
+```
