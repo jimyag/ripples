@@ -3,81 +3,74 @@ package output
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
+	"io"
 
-	"github.com/jimyag/ripples/internal/analyzer"
+	"github.com/jimyag/ripples/internal/impact"
 )
 
-// Reporter 结果报告器
+// Reporter formats affected packages for CLI consumers.
 type Reporter struct {
-	results []analyzer.AffectedBinary
+	writer  io.Writer
+	results []impact.Package
 }
 
-// NewReporter 创建报告器
-func NewReporter(results []analyzer.AffectedBinary) *Reporter {
-	return &Reporter{
-		results: results,
+// NewReporter creates a reporter that writes to writer.
+func NewReporter(writer io.Writer, results []impact.Package) *Reporter {
+	return &Reporter{writer: writer, results: results}
+}
+
+// Print writes the requested output format.
+func (r *Reporter) Print(format string) error {
+	switch format {
+	case "simple":
+		return r.printSimple()
+	case "json":
+		return r.printJSON()
+	case "text", "summary":
+		return r.printSummary()
+	default:
+		return fmt.Errorf("不支持的输出格式 %q", format)
 	}
 }
 
-// PrintText 打印文本格式的报告
-func (r *Reporter) PrintText() {
-	if len(r.results) == 0 {
-		fmt.Println("✅ 未检测到受影响的服务。")
-		return
-	}
-
-	fmt.Printf("🔍 检测到 %d 个受影响的服务:\n", len(r.results))
-	fmt.Println(strings.Repeat("-", 50))
-
-	for _, res := range r.results {
-		fmt.Printf("📦 Service: \033[1;32m%s\033[0m\n", res.Name) // Green color for service name
-		fmt.Printf("   📍 Main Package: %s\n", res.PkgPath)
-		fmt.Println("   🔗 Call Chain:")
-
-		for i, node := range res.TracePath {
-			prefix := "      "
-			if i == 0 {
-				prefix = "      🚀 " // Start
-			} else if i == len(res.TracePath)-1 {
-				prefix = "      🏁 " // End
-			} else {
-				prefix = "      ⬇️ "
-			}
-
-			// Highlight changed symbol
-			if strings.Contains(node, "(Changed)") {
-				fmt.Printf("%s\033[1;31m%s\033[0m\n", prefix, node) // Red for changed symbol
-			} else {
-				fmt.Printf("%s%s\n", prefix, node)
-			}
+func (r *Reporter) printSimple() error {
+	for _, pkg := range r.results {
+		if _, err := fmt.Fprintln(r.writer, displayName(pkg)); err != nil {
+			return err
 		}
-		fmt.Println(strings.Repeat("-", 50))
 	}
-}
-
-// PrintJSON 打印JSON格式的报告
-func (r *Reporter) PrintJSON() error {
-	jsonData, err := json.MarshalIndent(r.results, "", "  ")
-	if err != nil {
-		return fmt.Errorf("生成JSON失败: %w", err)
-	}
-
-	fmt.Println(string(jsonData))
 	return nil
 }
 
-// PrintSummary 打印简短摘要
-func (r *Reporter) PrintSummary() {
-	fmt.Printf("受影响的服务: %d 个\n", len(r.results))
-	for _, res := range r.results {
-		fmt.Printf("- %s\n", res.Name)
+func (r *Reporter) printJSON() error {
+	type packageResult struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
 	}
+	results := make([]packageResult, 0, len(r.results))
+	for _, pkg := range r.results {
+		results = append(results, packageResult{
+			Path: pkg.RelativePath,
+			Name: pkg.Name,
+		})
+	}
+	encoder := json.NewEncoder(r.writer)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(results)
 }
 
-// PrintSimple 打印简化格式 - 仅服务名，每行一个（适合脚本解析）
-func (r *Reporter) PrintSimple() {
-	for _, res := range r.results {
-		fmt.Println(res.Name)
+func (r *Reporter) printSummary() error {
+	if _, err := fmt.Fprintf(r.writer, "受影响的包: %d 个\n", len(r.results)); err != nil {
+		return err
 	}
+	for _, pkg := range r.results {
+		if _, err := fmt.Fprintf(r.writer, "- %s\n", displayName(pkg)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func displayName(pkg impact.Package) string {
+	return pkg.RelativePath + "." + pkg.Name
 }
