@@ -124,16 +124,16 @@ jobs:
           mkdir -p "$release_dir"
           gh release download "$RIPPLES_VERSION" \
             --repo jimyag/ripples \
-            --pattern "ripples_linux_amd64.tar.gz" \
+            --pattern "ripples_linux_amd64" \
             --pattern "checksums.txt" \
             --dir "$release_dir"
           (
             cd "$release_dir"
             sha256sum --ignore-missing --check checksums.txt
           )
-          tar -xzf "$release_dir/ripples_linux_amd64.tar.gz" \
-            -C "$RUNNER_TEMP" \
-            ripples
+          install -m 0755 \
+            "$release_dir/ripples_linux_amd64" \
+            "$RUNNER_TEMP/ripples"
       - name: Analyze affected packages
         id: targets
         env:
@@ -199,7 +199,7 @@ task release-snapshot
 
 ## 发布
 
-推送 `v*` tag 后，GitHub Actions 会通过 GoReleaser 创建 Release，并上传 Linux、macOS 和 Windows 的 amd64/arm64 二进制归档及校验文件。
+推送 `v*` tag 后，GitHub Actions 会通过 GoReleaser 创建 Release，并上传 Linux、macOS 和 Windows 的 amd64/arm64 二进制及校验文件。
 
 发布前可以在本地验证：
 
