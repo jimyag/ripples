@@ -12,7 +12,7 @@ import (
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-func TestAnalyzeReturnsChangedPackageAndTransitiveImporters(t *testing.T) {
+func TestAnalyzeReturnsChangedDeclarationAndTransitiveCallers(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "payment/payment.go", `package payment
 
@@ -52,6 +52,140 @@ func Pay() string { return "new" }
 		"internal/order.order",
 		"payment.payment",
 	})
+}
+
+func TestAnalyzeDoesNotPropagateThroughUnrelatedDeclaration(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+func Used() string { return "used" }
+func Unrelated() string { return "old" }
+`)
+	writeModuleFile(t, repo, "consumer/consumer.go", `package consumer
+
+import "example.com/app/shared"
+
+func Value() string { return shared.Used() }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/consumer"
+
+func main() { _ = consumer.Value() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+
+	writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+func Used() string { return "used" }
+func Unrelated() string { return "new" }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"shared.shared"})
+}
+
+func TestAnalyzeDoesNotPropagateAddedUnusedInterfaceMethod(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "client/client.go", `package client
+
+type API interface {
+	Used() string
+}
+
+type Client struct{}
+
+func (Client) Used() string { return "used" }
+`)
+	writeModuleFile(t, repo, "consumer/consumer.go", `package consumer
+
+import "example.com/app/client"
+
+func Value(api client.API) string { return api.Used() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+
+	writeModuleFile(t, repo, "client/client.go", `package client
+
+type API interface {
+	Used() string
+	Unrelated() string
+}
+
+type Client struct{}
+
+func (Client) Used() string { return "used" }
+func (Client) Unrelated() string { return "new" }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"client.client"})
+}
+
+func TestAnalyzeDoesNotPropagateAddedUnusedDeclaration(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+func Used() string { return "used" }
+`)
+	writeModuleFile(t, repo, "consumer/consumer.go", `package consumer
+
+import "example.com/app/shared"
+
+func Value() string { return shared.Used() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+func Used() string { return "used" }
+func Added() string { return "added" }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"shared.shared"})
+}
+
+func TestAnalyzeDoesNotPropagateDeletedUnusedDeclaration(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+func Used() string { return "used" }
+func Removed() string { return "removed" }
+`)
+	writeModuleFile(t, repo, "consumer/consumer.go", `package consumer
+
+import "example.com/app/shared"
+
+func Value() string { return shared.Used() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+func Used() string { return "used" }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"shared.shared"})
 }
 
 func TestAnalyzeUsesOldGraphForDeletedPackage(t *testing.T) {

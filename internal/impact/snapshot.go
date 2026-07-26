@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,7 +36,16 @@ type PackageSnapshot struct {
 	ModulePath string             `json:"module_path"`
 	ModuleHash string             `json:"module_hash"`
 	Packages   map[string]Package `json:"packages"`
+	Symbols    map[string]Symbol  `json:"symbols"`
 	Cached     bool               `json:"-"`
+}
+
+// Symbol is one package-level declaration and the declarations it uses.
+type Symbol struct {
+	ID           string   `json:"id"`
+	PackagePath  string   `json:"package_path"`
+	Hash         string   `json:"hash"`
+	Dependencies []string `json:"dependencies,omitempty"`
 }
 
 func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (PackageSnapshot, error) {
@@ -48,7 +58,11 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 			gopackages.NeedImports |
 			gopackages.NeedDeps |
 			gopackages.NeedModule |
-			gopackages.NeedEmbedFiles,
+			gopackages.NeedEmbedFiles |
+			gopackages.NeedSyntax |
+			gopackages.NeedTypes |
+			gopackages.NeedTypesInfo |
+			gopackages.NeedTypesSizes,
 	}
 	loaded, err := gopackages.Load(cfg, "./...")
 	if err != nil {
@@ -79,6 +93,7 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 		ModulePath: modulePath,
 		ModuleHash: moduleFilesHash(source.Dir),
 		Packages:   make(map[string]Package, len(loaded)),
+		Symbols:    make(map[string]Symbol),
 	}
 	for _, loadedPackage := range loaded {
 		pkg, err := summarizePackage(source.Dir, modulePath, loadedPackage)
@@ -86,6 +101,10 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 			return PackageSnapshot{}, err
 		}
 		result.Packages[pkg.Path] = pkg
+	}
+	result.Symbols, err = summarizeSymbols(source.Dir, loaded, result.Packages)
+	if err != nil {
+		return PackageSnapshot{}, err
 	}
 	return result, nil
 }
@@ -158,6 +177,29 @@ func astFieldFilter(name string, value reflect.Value) bool {
 		return false
 	}
 	return value.Type() != reflect.TypeFor[token.Pos]()
+}
+
+func astHash(node ast.Node, fset *token.FileSet) (string, error) {
+	hash := sha256.New()
+	if err := ast.Fprint(hash, fset, node, astFieldFilter); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func objectKind(object types.Object) string {
+	switch object.(type) {
+	case *types.Const:
+		return "const"
+	case *types.Func:
+		return "func"
+	case *types.TypeName:
+		return "type"
+	case *types.Var:
+		return "var"
+	default:
+		return "object"
+	}
 }
 
 func contentHash(filename string) (string, error) {

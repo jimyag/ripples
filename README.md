@@ -1,16 +1,16 @@
 # ripples
 
-基于 Go AST 和 package import graph 的代码变更影响分析工具。
+基于 Go AST、类型信息和声明依赖图的代码变更影响分析工具。
 
 给定同一个 Git 仓库中的两个提交，ripples 会：
 
 1. 将 old/new 提交分别解压到临时目录，不修改当前工作区。
 2. 解析当前构建配置下各 package 的 Go AST。
 3. 忽略注释和源码位置，比较 package 的语义内容。
-4. 合并 old/new 两版 import graph，从变更 package 反向查找所有直接和间接使用者。
+4. 合并 old/new 两版声明依赖图，从变更函数、方法、类型、变量和常量反向查找真实使用者。
 5. 稳定排序并输出 `<模块内路径>.<package 名>`。
 
-分析采用 package 级保守策略：只要 package 的运行时代码发生变化，其直接和间接 importer 都视为受影响。
+分析采用声明级策略：变更 package 本身始终返回；其他 package 只有真实引用或调用了变更声明时才视为受影响，单纯 import 同一个 package 不会传播。
 
 ## 安装
 

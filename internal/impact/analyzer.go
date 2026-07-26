@@ -10,9 +10,9 @@ import (
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-const analysisVersion = "package-impact-v1"
+const analysisVersion = "symbol-impact-v3"
 
-// Analyzer computes package-level impact between two Git revisions.
+// Analyzer computes declaration-level impact between two Git revisions.
 type Analyzer struct {
 	cache *snapshot.Cache
 }
@@ -34,12 +34,21 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 		return nil, fmt.Errorf("load new snapshot: %w", err)
 	}
 
-	changed := changedPackages(oldSnapshot, newSnapshot)
-	reverse := reverseImports(oldSnapshot, newSnapshot)
-	affected := transitiveImporters(changed, reverse)
+	changed := changedSymbols(oldSnapshot, newSnapshot)
+	reverse := reverseDependencies(oldSnapshot, newSnapshot)
+	affectedSymbols := transitiveDependents(changed, reverse)
 
-	results := make([]Package, 0, len(affected))
-	for path := range affected {
+	affectedPackages := make(map[string]struct{})
+	for id := range affectedSymbols {
+		symbol, ok := newSnapshot.Symbols[id]
+		if !ok {
+			symbol = oldSnapshot.Symbols[id]
+		}
+		affectedPackages[symbol.PackagePath] = struct{}{}
+	}
+
+	results := make([]Package, 0, len(affectedPackages))
+	for path := range affectedPackages {
 		pkg, ok := newSnapshot.Packages[path]
 		if !ok {
 			pkg = oldSnapshot.Packages[path]
@@ -103,46 +112,46 @@ func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (*Pac
 	return &result, nil
 }
 
-func changedPackages(oldSnapshot, newSnapshot *PackageSnapshot) map[string]struct{} {
+func changedSymbols(oldSnapshot, newSnapshot *PackageSnapshot) map[string]struct{} {
 	changed := make(map[string]struct{})
-	all := make(map[string]struct{}, len(oldSnapshot.Packages)+len(newSnapshot.Packages))
-	for path := range oldSnapshot.Packages {
-		all[path] = struct{}{}
+	all := make(map[string]struct{}, len(oldSnapshot.Symbols)+len(newSnapshot.Symbols))
+	for id := range oldSnapshot.Symbols {
+		all[id] = struct{}{}
 	}
-	for path := range newSnapshot.Packages {
-		all[path] = struct{}{}
+	for id := range newSnapshot.Symbols {
+		all[id] = struct{}{}
 	}
 
 	moduleChanged := oldSnapshot.ModuleHash != newSnapshot.ModuleHash
-	for path := range all {
-		oldPkg, oldOK := oldSnapshot.Packages[path]
-		newPkg, newOK := newSnapshot.Packages[path]
-		if moduleChanged || !oldOK || !newOK || oldPkg.Hash != newPkg.Hash || oldPkg.Name != newPkg.Name {
-			changed[path] = struct{}{}
+	for id := range all {
+		oldSymbol, oldOK := oldSnapshot.Symbols[id]
+		newSymbol, newOK := newSnapshot.Symbols[id]
+		if moduleChanged || !oldOK || !newOK || oldSymbol.Hash != newSymbol.Hash {
+			changed[id] = struct{}{}
 		}
 	}
 	return changed
 }
 
-func reverseImports(snapshots ...*PackageSnapshot) map[string]map[string]struct{} {
+func reverseDependencies(snapshots ...*PackageSnapshot) map[string]map[string]struct{} {
 	reverse := make(map[string]map[string]struct{})
 	for _, packageSnapshot := range snapshots {
-		for _, pkg := range packageSnapshot.Packages {
-			for _, imported := range pkg.Imports {
-				if _, local := packageSnapshot.Packages[imported]; !local {
+		for _, symbol := range packageSnapshot.Symbols {
+			for _, dependency := range symbol.Dependencies {
+				if _, local := packageSnapshot.Symbols[dependency]; !local {
 					continue
 				}
-				if reverse[imported] == nil {
-					reverse[imported] = make(map[string]struct{})
+				if reverse[dependency] == nil {
+					reverse[dependency] = make(map[string]struct{})
 				}
-				reverse[imported][pkg.Path] = struct{}{}
+				reverse[dependency][symbol.ID] = struct{}{}
 			}
 		}
 	}
 	return reverse
 }
 
-func transitiveImporters(changed map[string]struct{}, reverse map[string]map[string]struct{}) map[string]struct{} {
+func transitiveDependents(changed map[string]struct{}, reverse map[string]map[string]struct{}) map[string]struct{} {
 	affected := make(map[string]struct{}, len(changed))
 	queue := make([]string, 0, len(changed))
 	for path := range changed {
