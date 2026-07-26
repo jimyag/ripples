@@ -7,10 +7,10 @@
 1. 将 old/new 提交分别解压到临时目录，不修改当前工作区。
 2. 解析当前构建配置下各 package 的 Go AST。
 3. 忽略注释和源码位置，比较 package 的语义内容。
-4. 合并 old/new 两版声明依赖图，从变更函数、方法、类型、变量和常量反向查找真实使用者。
+4. 合并 old/new 两版声明依赖图，从变更函数、方法、类型、变量、常量和嵌入文件反向查找真实使用者。
 5. 稳定排序并输出 `<模块内路径>.<package 名>`。
 
-分析采用声明级策略：变更 package 本身始终返回；其他 package 只有真实引用或调用了变更声明时才视为受影响，单纯 import 同一个 package 不会传播。
+分析采用声明级策略：变更 package 本身始终返回；其他 package 只有真实引用或调用了变更声明时才视为受影响，单纯 import 同一个 package 不会传播。接口实参和接口字段会按调用点记录已知的具体实现，不会把同一接口在其他调用点的实现混入当前调用链。
 
 ## 安装
 
@@ -81,14 +81,14 @@ RIPPLES_CACHE=/absolute/path/to/cache ./ripples ...
 - `GOOS`、`GOARCH`、`CGO_ENABLED`
 - `GOFLAGS`、`GOEXPERIMENT`
 
-声明摘要还包含当前构建中的 Go AST、类型解析结果、embed 文件、其他编译输入、声明依赖图，以及 `go.mod`/`go.work`。
+声明摘要还包含当前构建中的 Go AST、类型解析结果、`go:embed` 文件到变量声明的映射、其他编译输入、声明依赖图，以及 `go.mod`/`go.work`。
 
 ## 行为边界
 
 - 默认不分析 `_test.go`。
 - 只分析当前 `GOOS`、`GOARCH` 和 build tags 对应的构建配置。
 - 注释-only 变更不会产生受影响 package。
-- 无法由 AST 和类型信息唯一确定具体实现的接口、反射和高阶动态调用不会猜测传播。
+- 接口实参、接口字段和转发调用中可由 AST 与类型信息确定的具体实现会继续传播；无法确定的接口、反射和高阶动态调用不会猜测传播。
 - 新增和删除声明分别使用 new 和 old 依赖图。
 - `go.mod` 或 `go.work` 变化按保守策略影响所有本地 package。
 - 输出只表示 Go package 影响；binary、service 和部署单元应由调用方继续映射。
