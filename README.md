@@ -83,6 +83,90 @@ RIPPLES_CACHE=/absolute/path/to/cache ./ripples ...
 
 声明摘要还包含当前构建中的 Go AST、类型解析结果、`go:embed` 文件到变量声明的映射、其他编译输入、声明依赖图，以及 `go.mod`/`go.work`。
 
+## 在 CI 中使用
+
+下面的 GitHub Actions 示例会分析一个 PR 相对 base commit 影响的 package，并把 `cmd/server.main` 映射为后续 job 的开关。其他 binary 或 service 可以用相同方式继续映射。
+
+```yaml
+name: Impact
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # 替换为要使用的已发布 tag。
+  RIPPLES_VERSION: vX.Y.Z
+
+jobs:
+  impact:
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ steps.targets.outputs.server }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          path: source
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ripples-cache
+          key: ripples-${{ env.RIPPLES_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.event.pull_request.head.sha }}
+          restore-keys: |
+            ripples-${{ env.RIPPLES_VERSION }}-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install ripples release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_dir="$RUNNER_TEMP/ripples-release"
+          mkdir -p "$release_dir"
+          gh release download "$RIPPLES_VERSION" \
+            --repo jimyag/ripples \
+            --pattern "ripples_linux_amd64.tar.gz" \
+            --pattern "checksums.txt" \
+            --dir "$release_dir"
+          (
+            cd "$release_dir"
+            sha256sum --ignore-missing --check checksums.txt
+          )
+          tar -xzf "$release_dir/ripples_linux_amd64.tar.gz" \
+            -C "$RUNNER_TEMP" \
+            ripples
+      - name: Analyze affected packages
+        id: targets
+        env:
+          RIPPLES_CACHE: ${{ runner.temp }}/ripples-cache
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          "$RUNNER_TEMP/ripples" \
+            -repo source \
+            -old "$BASE_SHA" \
+            -new "$HEAD_SHA" |
+            tee affected-packages.txt
+
+          if grep -Fxq "cmd/server.main" affected-packages.txt; then
+            echo "server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "server=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test-server:
+    needs: impact
+    if: needs.impact.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test ./cmd/server/... ./internal/server/...
+```
+
+`fetch-depth: 0` 是必需的，否则 runner 上可能没有 base commit。`RIPPLES_CACHE` 必须是绝对路径；缓存内部已经包含 Git tree、Go toolchain 和构建配置，可以跨 PR 增量复用。CI 应固定 `RIPPLES_VERSION`，并使用 Release 中的 `checksums.txt` 校验下载的二进制。
+
 ## 行为边界
 
 - 默认不分析 `_test.go`。
