@@ -27,6 +27,7 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 		pkgDeclarations := packageDeclarations(root, pkg, objectIDs)
 		declarations = append(declarations, pkgDeclarations...)
 	}
+	functions := functionDeclarations(declarations)
 
 	symbols := make(map[string]Symbol, len(declarations))
 	for _, declaration := range declarations {
@@ -54,6 +55,11 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 				return true
 			})
 		}
+		dispatchSymbols := interfaceArgumentDependencies(declaration, packages, objectIDs, functions)
+		for _, dispatch := range dispatchSymbols {
+			dependencies[dispatch.ID] = struct{}{}
+			symbols[dispatch.ID] = dispatch
+		}
 
 		symbols[declaration.id] = Symbol{
 			ID:           declaration.id,
@@ -72,6 +78,389 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 	}
 	addInitializationDependencies(loaded, packages, objectIDs, symbols)
 	return symbols, nil
+}
+
+func functionDeclarations(declarations []symbolDeclaration) map[*types.Func]symbolDeclaration {
+	result := make(map[*types.Func]symbolDeclaration)
+	for _, declaration := range declarations {
+		function, ok := declaration.node.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		object, _ := declaration.pkg.TypesInfo.Defs[function.Name].(*types.Func)
+		if object != nil {
+			result[object] = declaration
+		}
+	}
+	return result
+}
+
+func interfaceArgumentDependencies(
+	declaration symbolDeclaration,
+	packages map[string]Package,
+	objectIDs map[types.Object]string,
+	functions map[*types.Func]symbolDeclaration,
+) []Symbol {
+	var result []Symbol
+	if declaration.node == nil {
+		return result
+	}
+	index := 0
+	ast.Inspect(declaration.node, func(node ast.Node) bool {
+		switch typedNode := node.(type) {
+		case *ast.CallExpr:
+			functionType := declaration.pkg.TypesInfo.TypeOf(typedNode.Fun)
+			if functionType == nil {
+				return true
+			}
+			signature, _ := functionType.Underlying().(*types.Signature)
+			callee := calledObject(declaration.pkg.TypesInfo, typedNode.Fun)
+			if signature == nil || callee == nil || callee.Pkg() == nil {
+				return true
+			}
+			contextPackage := callee.Pkg().Path()
+			if _, local := packages[contextPackage]; !local {
+				return true
+			}
+			for argumentIndex, argument := range typedNode.Args {
+				parameterType := callParameterType(signature, argumentIndex)
+				dispatch := interfaceBindingSymbol(
+					declaration,
+					contextPackage,
+					index,
+					parameterType,
+					declaration.pkg.TypesInfo.TypeOf(argument),
+					objectIDs,
+				)
+				if dispatch == nil {
+					continue
+				}
+				index++
+				result = append(result, *dispatch)
+			}
+			traced := traceInterfaceCall(declaration, typedNode, functions, objectIDs)
+			tracedPackages := make([]string, 0, len(traced))
+			for packagePath := range traced {
+				tracedPackages = append(tracedPackages, packagePath)
+			}
+			sort.Strings(tracedPackages)
+			for _, packagePath := range tracedPackages {
+				id := declaration.id + "::interface-trace::" + strconv.Itoa(index)
+				index++
+				result = append(result, Symbol{
+					ID:           id,
+					PackagePath:  packagePath,
+					Hash:         stableMarkerHash("interface-trace"),
+					Dependencies: sortedSet(traced[packagePath]),
+				})
+			}
+		case *ast.CompositeLit:
+			structType, contextPackage := namedStruct(declaration.pkg.TypesInfo.TypeOf(typedNode))
+			if structType == nil {
+				return true
+			}
+			if _, local := packages[contextPackage]; !local {
+				return true
+			}
+			for elementIndex, element := range typedNode.Elts {
+				fieldIndex := elementIndex
+				value := ast.Expr(element)
+				if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
+					value = keyValue.Value
+					key, _ := keyValue.Key.(*ast.Ident)
+					field, _ := declaration.pkg.TypesInfo.Uses[key].(*types.Var)
+					fieldIndex = structFieldIndex(structType, field)
+				}
+				if fieldIndex < 0 || fieldIndex >= structType.NumFields() {
+					continue
+				}
+				dispatch := interfaceBindingSymbol(
+					declaration,
+					contextPackage,
+					index,
+					structType.Field(fieldIndex).Type(),
+					declaration.pkg.TypesInfo.TypeOf(value),
+					objectIDs,
+				)
+				if dispatch == nil {
+					continue
+				}
+				index++
+				result = append(result, *dispatch)
+			}
+		}
+		return true
+	})
+	return result
+}
+
+func interfaceBindingSymbol(
+	declaration symbolDeclaration,
+	contextPackage string,
+	index int,
+	interfaceType types.Type,
+	actualType types.Type,
+	objectIDs map[types.Object]string,
+) *Symbol {
+	if interfaceType == nil || actualType == nil {
+		return nil
+	}
+	iface, ok := interfaceType.Underlying().(*types.Interface)
+	if !ok || iface.NumMethods() == 0 {
+		return nil
+	}
+	if _, alreadyInterface := actualType.Underlying().(*types.Interface); alreadyInterface {
+		return nil
+	}
+	if !types.AssignableTo(actualType, interfaceType) {
+		return nil
+	}
+	dependencies := concreteInterfaceMethods(actualType, iface, objectIDs)
+	if len(dependencies) == 0 {
+		return nil
+	}
+	return &Symbol{
+		ID:           declaration.id + "::interface-binding::" + strconv.Itoa(index),
+		PackagePath:  contextPackage,
+		Hash:         stableMarkerHash("interface-binding"),
+		Dependencies: dependencies,
+	}
+}
+
+func namedStruct(typ types.Type) (*types.Struct, string) {
+	if pointer, ok := typ.(*types.Pointer); ok {
+		typ = pointer.Elem()
+	}
+	named, ok := typ.(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return nil, ""
+	}
+	structType, _ := named.Underlying().(*types.Struct)
+	return structType, named.Obj().Pkg().Path()
+}
+
+func structFieldIndex(structType *types.Struct, field *types.Var) int {
+	if field == nil {
+		return -1
+	}
+	for index := range structType.NumFields() {
+		if structType.Field(index) == field {
+			return index
+		}
+	}
+	return -1
+}
+
+type interfaceCallTracer struct {
+	functions map[*types.Func]symbolDeclaration
+	objectIDs map[types.Object]string
+	visited   map[string]struct{}
+	byPackage map[string]map[string]struct{}
+	active    []string
+}
+
+func traceInterfaceCall(
+	caller symbolDeclaration,
+	call *ast.CallExpr,
+	functions map[*types.Func]symbolDeclaration,
+	objectIDs map[types.Object]string,
+) map[string]map[string]struct{} {
+	function, _ := calledObject(caller.pkg.TypesInfo, call.Fun).(*types.Func)
+	declaration, ok := functions[function]
+	if !ok {
+		return nil
+	}
+	bindings := callInterfaceBindings(caller.pkg, call, function, nil)
+	if len(bindings) == 0 {
+		return nil
+	}
+	tracer := interfaceCallTracer{
+		functions: functions,
+		objectIDs: objectIDs,
+		visited:   make(map[string]struct{}),
+		byPackage: make(map[string]map[string]struct{}),
+	}
+	tracer.traceFunction(declaration, function, bindings)
+	return tracer.byPackage
+}
+
+func (tracer *interfaceCallTracer) traceFunction(
+	declaration symbolDeclaration,
+	function *types.Func,
+	bindings map[types.Object]types.Type,
+) {
+	key := function.FullName() + bindingKey(bindings)
+	if _, seen := tracer.visited[key]; seen {
+		return
+	}
+	tracer.visited[key] = struct{}{}
+
+	ast.Inspect(declaration.node, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if selection, ok := call.Fun.(*ast.SelectorExpr); ok {
+			staticSelection := declaration.pkg.TypesInfo.Selections[selection]
+			if staticSelection != nil {
+				receiverType := resolvedExpressionType(declaration.pkg, selection.X, bindings)
+				if receiverType != nil {
+					if _, concrete := receiverType.Underlying().(*types.Interface); !concrete {
+						method, _, _ := types.LookupFieldOrMethod(
+							receiverType,
+							true,
+							staticSelection.Obj().Pkg(),
+							staticSelection.Obj().Name(),
+						)
+						concreteMethod, _ := method.(*types.Func)
+						if concreteMethod != nil && concreteMethod != staticSelection.Obj() {
+							tracer.addMethod(concreteMethod)
+							if target, exists := tracer.functions[concreteMethod]; exists {
+								next := callInterfaceBindings(declaration.pkg, call, concreteMethod, bindings)
+								tracer.active = append(tracer.active, concreteMethod.Pkg().Path())
+								tracer.traceFunction(target, concreteMethod, next)
+								tracer.active = tracer.active[:len(tracer.active)-1]
+							}
+							return true
+						}
+					}
+				}
+			}
+		}
+
+		callee, _ := calledObject(declaration.pkg.TypesInfo, call.Fun).(*types.Func)
+		target, exists := tracer.functions[callee]
+		if !exists {
+			return true
+		}
+		next := callInterfaceBindings(declaration.pkg, call, callee, bindings)
+		if len(next) > 0 {
+			tracer.traceFunction(target, callee, next)
+		}
+		return true
+	})
+}
+
+func (tracer *interfaceCallTracer) addMethod(method *types.Func) {
+	id, ok := tracer.objectIDs[method]
+	if !ok || method.Pkg() == nil {
+		return
+	}
+	packagePaths := append([]string{method.Pkg().Path()}, tracer.active...)
+	for _, packagePath := range packagePaths {
+		if tracer.byPackage[packagePath] == nil {
+			tracer.byPackage[packagePath] = make(map[string]struct{})
+		}
+		tracer.byPackage[packagePath][id] = struct{}{}
+	}
+}
+
+func callInterfaceBindings(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	callee *types.Func,
+	current map[types.Object]types.Type,
+) map[types.Object]types.Type {
+	signature, _ := callee.Type().(*types.Signature)
+	if signature == nil {
+		return nil
+	}
+	result := make(map[types.Object]types.Type)
+	for index, argument := range call.Args {
+		parameterType := callParameterType(signature, index)
+		if parameterType == nil {
+			continue
+		}
+		if _, ok := parameterType.Underlying().(*types.Interface); !ok {
+			continue
+		}
+		actualType := resolvedExpressionType(caller, argument, current)
+		if actualType == nil {
+			continue
+		}
+		if _, stillInterface := actualType.Underlying().(*types.Interface); stillInterface {
+			continue
+		}
+		parameterIndex := index
+		if signature.Variadic() && parameterIndex >= signature.Params().Len() {
+			parameterIndex = signature.Params().Len() - 1
+		}
+		if parameterIndex >= 0 && parameterIndex < signature.Params().Len() {
+			result[signature.Params().At(parameterIndex)] = actualType
+		}
+	}
+	return result
+}
+
+func resolvedExpressionType(
+	pkg *gopackages.Package,
+	expression ast.Expr,
+	bindings map[types.Object]types.Type,
+) types.Type {
+	if identifier, ok := expression.(*ast.Ident); ok {
+		if resolved := bindings[pkg.TypesInfo.Uses[identifier]]; resolved != nil {
+			return resolved
+		}
+	}
+	return pkg.TypesInfo.TypeOf(expression)
+}
+
+func bindingKey(bindings map[types.Object]types.Type) string {
+	parts := make([]string, 0, len(bindings))
+	for object, typ := range bindings {
+		parts = append(parts, object.Name()+"="+types.TypeString(typ, packageQualifier))
+	}
+	sort.Strings(parts)
+	return "::" + strings.Join(parts, ",")
+}
+
+func callParameterType(signature *types.Signature, argumentIndex int) types.Type {
+	count := signature.Params().Len()
+	if argumentIndex < count {
+		if !signature.Variadic() || argumentIndex < count-1 {
+			return signature.Params().At(argumentIndex).Type()
+		}
+	}
+	if !signature.Variadic() || count == 0 {
+		return nil
+	}
+	slice, _ := signature.Params().At(count - 1).Type().(*types.Slice)
+	if slice == nil {
+		return nil
+	}
+	return slice.Elem()
+}
+
+func calledObject(info *types.Info, expression ast.Expr) types.Object {
+	switch typedExpression := expression.(type) {
+	case *ast.Ident:
+		return info.Uses[typedExpression]
+	case *ast.SelectorExpr:
+		if selection := info.Selections[typedExpression]; selection != nil {
+			return selection.Obj()
+		}
+		return info.Uses[typedExpression.Sel]
+	case *ast.IndexExpr:
+		return calledObject(info, typedExpression.X)
+	case *ast.IndexListExpr:
+		return calledObject(info, typedExpression.X)
+	case *ast.ParenExpr:
+		return calledObject(info, typedExpression.X)
+	default:
+		return nil
+	}
+}
+
+func concreteInterfaceMethods(actualType types.Type, iface *types.Interface, objectIDs map[types.Object]string) []string {
+	dependencies := make(map[string]struct{})
+	for methodIndex := range iface.NumMethods() {
+		required := iface.Method(methodIndex)
+		object, _, _ := types.LookupFieldOrMethod(actualType, true, required.Pkg(), required.Name())
+		if id, ok := objectIDs[object]; ok {
+			dependencies[id] = struct{}{}
+		}
+	}
+	return sortedSet(dependencies)
 }
 
 type symbolDeclaration struct {
@@ -258,6 +647,9 @@ func memberDeclarations(pkg *gopackages.Package, owner, kind string, fields *ast
 }
 
 func sortedSet(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
 	result := make([]string, 0, len(values))
 	for value := range values {
 		result = append(result, value)

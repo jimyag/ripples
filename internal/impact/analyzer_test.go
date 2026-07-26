@@ -228,6 +228,248 @@ func Run() { runner.Run(callback) }
 	})
 }
 
+func TestAnalyzePropagatesConcreteMethodThroughInterfaceArgument(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+
+func Run(service Service) {
+	service.Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() { println("old") }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	runner.Run(service.Service{})
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() { println("new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"runner.runner",
+		"service.service",
+	})
+}
+
+func TestAnalyzeDoesNotMixConcreteTypesPassedToSameInterface(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+
+func Run(service Service) {
+	service.Run()
+}
+`)
+	writeModuleFile(t, repo, "first/first.go", `package first
+
+import "example.com/app/runner"
+
+type Service struct{}
+
+func (Service) Run() { println("old") }
+func Start() { runner.Run(Service{}) }
+`)
+	writeModuleFile(t, repo, "second/second.go", `package second
+
+import "example.com/app/runner"
+
+type Service struct{}
+
+func (Service) Run() {}
+func Start() { runner.Run(Service{}) }
+`)
+	writeModuleFile(t, repo, "cmd/first/main.go", `package main
+
+import "example.com/app/first"
+
+func main() { first.Start() }
+`)
+	writeModuleFile(t, repo, "cmd/second/main.go", `package main
+
+import "example.com/app/second"
+
+func main() { second.Start() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "first/first.go", `package first
+
+import "example.com/app/runner"
+
+type Service struct{}
+
+func (Service) Run() { println("new") }
+func Start() { runner.Run(Service{}) }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/first.main",
+		"first.first",
+		"runner.runner",
+	})
+}
+
+func TestAnalyzePropagatesConcreteMethodStoredInInterfaceField(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (*Service) Run() { println("old") }
+`)
+	writeModuleFile(t, repo, "handler/handler.go", `package handler
+
+import "example.com/app/service"
+
+type Service interface {
+	Run()
+}
+
+type Handler struct {
+	service Service
+}
+
+func New(service *service.Service) *Handler {
+	return &Handler{service: service}
+}
+
+func (h *Handler) Run() {
+	h.service.Run()
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"example.com/app/handler"
+	"example.com/app/service"
+)
+
+func main() {
+	handler.New(&service.Service{}).Run()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (*Service) Run() { println("new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"handler.handler",
+		"service.service",
+	})
+}
+
+func TestAnalyzePropagatesConcreteMethodThroughForwardedInterfaces(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "worker/worker.go", `package worker
+
+type Job interface {
+	Run()
+}
+
+type Worker interface {
+	Execute(Job)
+}
+
+type DefaultWorker struct{}
+
+func (DefaultWorker) Execute(job Job) {
+	job.Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Job struct{}
+
+func (Job) Run() { println("old") }
+`)
+	writeModuleFile(t, repo, "orchestrator/orchestrator.go", `package orchestrator
+
+import "example.com/app/worker"
+
+func Start(job worker.Job, executor worker.Worker) {
+	executor.Execute(job)
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"example.com/app/orchestrator"
+	"example.com/app/service"
+	"example.com/app/worker"
+)
+
+func main() {
+	orchestrator.Start(service.Job{}, worker.DefaultWorker{})
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Job struct{}
+
+func (Job) Run() { println("new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"orchestrator.orchestrator",
+		"service.service",
+		"worker.worker",
+	})
+}
+
 func TestAnalyzePropagatesPackageInitializationChange(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "startup/startup.go", `package startup
@@ -359,6 +601,9 @@ func TestLoadSnapshotUsesPersistentCache(t *testing.T) {
 	}
 	if !reflect.DeepEqual(first.Packages, second.Packages) {
 		t.Fatalf("cached packages differ:\nfirst=%v\nsecond=%v", first.Packages, second.Packages)
+	}
+	if !reflect.DeepEqual(first.Symbols, second.Symbols) {
+		t.Fatalf("cached symbols differ:\nfirst=%v\nsecond=%v", first.Symbols, second.Symbols)
 	}
 }
 
