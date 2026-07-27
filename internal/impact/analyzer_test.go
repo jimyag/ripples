@@ -7,10 +7,79 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jimyag/ripples/internal/snapshot"
 )
+
+func TestLoadSnapshotPairRunsConcurrently(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseLoads := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	defer releaseLoads()
+	load := func(_ context.Context, _, ref string) (*PackageSnapshot, error) {
+		started <- ref
+		<-release
+		return &PackageSnapshot{ModuleHash: ref}, nil
+	}
+
+	type result struct {
+		old *PackageSnapshot
+		new *PackageSnapshot
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		oldSnapshot, newSnapshot, err := loadSnapshotPair(
+			context.Background(),
+			"repo",
+			"old",
+			"new",
+			load,
+		)
+		done <- result{old: oldSnapshot, new: newSnapshot, err: err}
+	}()
+
+	refs := make(map[string]struct{}, 2)
+	for range 2 {
+		select {
+		case ref := <-started:
+			refs[ref] = struct{}{}
+		case <-time.After(time.Second):
+			t.Fatal("snapshots did not start concurrently")
+		}
+	}
+	releaseLoads()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("loadSnapshotPair() error = %v", got.err)
+		}
+		if got.old.ModuleHash != "old" || got.new.ModuleHash != "new" {
+			t.Fatalf(
+				"loadSnapshotPair() hashes = (%q, %q), want (old, new)",
+				got.old.ModuleHash,
+				got.new.ModuleHash,
+			)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("loadSnapshotPair() did not finish")
+	}
+	if _, ok := refs["old"]; !ok {
+		t.Fatal("old snapshot did not start")
+	}
+	if _, ok := refs["new"]; !ok {
+		t.Fatal("new snapshot did not start")
+	}
+}
 
 func TestAnalyzeReturnsChangedDeclarationAndTransitiveCallers(t *testing.T) {
 	repo := initModule(t)

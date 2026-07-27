@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/jimyag/ripples/internal/snapshot"
 )
@@ -26,13 +27,15 @@ func NewAnalyzer(cache *snapshot.Cache) *Analyzer {
 // Analyze returns changed packages and all packages that directly or
 // transitively import them in either snapshot.
 func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string) ([]Package, error) {
-	oldSnapshot, err := a.LoadSnapshot(ctx, repoPath, oldRef)
+	oldSnapshot, newSnapshot, err := loadSnapshotPair(
+		ctx,
+		repoPath,
+		oldRef,
+		newRef,
+		a.LoadSnapshot,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("load old snapshot: %w", err)
-	}
-	newSnapshot, err := a.LoadSnapshot(ctx, repoPath, newRef)
-	if err != nil {
-		return nil, fmt.Errorf("load new snapshot: %w", err)
+		return nil, err
 	}
 
 	changed := changedSymbols(oldSnapshot, newSnapshot)
@@ -66,6 +69,40 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 		return results[i].Path < results[j].Path
 	})
 	return results, nil
+}
+
+type snapshotLoader func(context.Context, string, string) (*PackageSnapshot, error)
+
+func loadSnapshotPair(
+	ctx context.Context,
+	repoPath, oldRef, newRef string,
+	load snapshotLoader,
+) (*PackageSnapshot, *PackageSnapshot, error) {
+	var (
+		oldSnapshot *PackageSnapshot
+		newSnapshot *PackageSnapshot
+		oldErr      error
+		newErr      error
+		wait        sync.WaitGroup
+	)
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		oldSnapshot, oldErr = load(ctx, repoPath, oldRef)
+	}()
+	go func() {
+		defer wait.Done()
+		newSnapshot, newErr = load(ctx, repoPath, newRef)
+	}()
+	wait.Wait()
+
+	if oldErr != nil {
+		return nil, nil, fmt.Errorf("load old snapshot: %w", oldErr)
+	}
+	if newErr != nil {
+		return nil, nil, fmt.Errorf("load new snapshot: %w", newErr)
+	}
+	return oldSnapshot, newSnapshot, nil
 }
 
 // LoadSnapshot loads a package summary from cache or builds it from an
