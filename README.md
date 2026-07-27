@@ -85,8 +85,8 @@ ripples -repo . -old HEAD~1 -new HEAD -verbose
 `-repo` 应指向待分析的 Go module，可以是 Git 仓库根目录，也可以是 monorepo 中的子目录。ripples 会自动找到 Git 根目录，临时 worktree 会保留同仓库 `replace` 所需的相对路径。例如：
 
 ```bash
-GOFLAGS='-tags=kodo,osusergo,netgo' ripples \
-  -repo /path/to/kodo/src/qiniu.com/kodo \
+ripples \
+  -repo /path/to/monorepo/services/api \
   -old HEAD~1 \
   -new HEAD
 ```
