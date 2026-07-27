@@ -1,40 +1,11 @@
 # ripples
 
-基于 Go AST、类型信息和声明依赖图的代码变更影响分析工具。
+[![Check](https://github.com/jimyag/ripples/actions/workflows/check.yaml/badge.svg)](https://github.com/jimyag/ripples/actions/workflows/check.yaml)
+[![Release](https://github.com/jimyag/ripples/actions/workflows/release.yaml/badge.svg)](https://github.com/jimyag/ripples/actions/workflows/release.yaml)
 
-给定同一个 Git 仓库中的两个提交，ripples 会：
+基于 Go AST、类型信息和声明依赖图，分析两个 Git revision 之间受直接或间接影响的 Go package。
 
-1. 将 old/new 提交分别解压到临时目录，不修改当前工作区。
-2. 解析当前构建配置下各 package 的 Go AST。
-3. 忽略注释和源码位置，比较 package 的语义内容。
-4. 合并 old/new 两版声明依赖图，从变更函数、方法、类型、变量、常量和嵌入文件反向查找真实使用者。
-5. 稳定排序并输出 `<模块内路径>.<package 名>`。
-
-分析采用声明级策略：变更 package 本身始终返回；其他 package 只有真实引用或调用了变更声明时才视为受影响，单纯 import 同一个 package 不会传播。当前 module 内的接口值会按调用点记录已知的具体实现，不会把同一接口在其他调用点的实现混入当前调用链。
-
-## 安装
-
-```bash
-go build -o ripples .
-```
-
-## 使用
-
-```bash
-./ripples -repo <仓库路径> -old <旧提交> -new <新提交>
-```
-
-参数：
-
-| 参数 | 说明 | 默认值 |
-| --- | --- | --- |
-| `-repo` | Git 仓库及 Go module 路径 | `.` |
-| `-old` | 旧 commit ID 或 ref | 必填 |
-| `-new` | 新 commit ID 或 ref | 必填 |
-| `-output` | `simple`、`json`、`text`、`summary` | `simple` |
-| `-verbose` | 在 stderr 显示数量和耗时 | `false` |
-
-### simple
+ripples 的稳定输出是 package，而不是 binary 或 service。调用方可以继续把 `cmd/server.main` 映射为构建任务、服务名或部署单元。
 
 ```text
 cmd/server.main
@@ -42,7 +13,97 @@ internal/order.order
 payment.payment
 ```
 
-### json
+## 工作方式
+
+给定同一仓库中的 old/new revision，ripples 会：
+
+1. 解析 revision 对应的 commit 和 Git tree，不修改当前工作区。
+2. 通过 `git archive` 将两棵 tree 分别流式解压到临时目录。
+3. 按当前 Go 构建配置加载本地 package 的 AST 和类型信息。
+4. 忽略注释和源码位置，比较函数、方法、类型、变量、常量和嵌入文件等声明的语义内容。
+5. 合并 old/new 声明依赖图，从变更声明反向查找直接及间接使用者。
+6. 稳定排序并输出 `<module 内相对路径>.<package 名>`。
+
+变更所在的 package 始终返回。其他 package 只有在声明实际引用或调用了变更内容时才会传播；仅仅 import 同一个 package 不会被判定为受影响。
+
+## 安装
+
+可以直接下载最新的 [GitHub Release](https://github.com/jimyag/ripples/releases/latest) 二进制，或者使用 `go install`。
+
+### 下载二进制
+
+| 系统 | 架构 | Release asset |
+| --- | --- | --- |
+| Linux | amd64 | `ripples_linux_amd64` |
+| Linux | arm64 | `ripples_linux_arm64` |
+| macOS | amd64 | `ripples_darwin_amd64` |
+| macOS | arm64 | `ripples_darwin_arm64` |
+| Windows | amd64 | `ripples_windows_amd64.exe` |
+| Windows | arm64 | `ripples_windows_arm64.exe` |
+
+例如，在 macOS arm64 上使用 GitHub CLI 安装：
+
+```bash
+gh release download \
+  --repo jimyag/ripples \
+  --pattern ripples_darwin_arm64 \
+  --dir /tmp/ripples-release
+install -m 0755 /tmp/ripples-release/ripples_darwin_arm64 /usr/local/bin/ripples
+```
+
+省略 tag 时，`gh release download` 会下载最新 Release。
+
+### 使用 go install
+
+```bash
+go install github.com/jimyag/ripples@latest
+```
+
+安装结果位于 `$(go env GOPATH)/bin/ripples`。
+
+运行时还需要：
+
+- `git`，用于解析 revision 和读取 Git tree。
+- Go toolchain，用于按照目标仓库的 `go.mod`、构建约束和当前环境加载 package。
+- 仓库根目录可以执行 `go list ./...`。
+
+## 快速使用
+
+```bash
+ripples \
+  -repo /path/to/repository \
+  -old <base-commit-or-ref> \
+  -new <head-commit-or-ref>
+```
+
+例如分析最近一次提交：
+
+```bash
+ripples -repo . -old HEAD~1 -new HEAD -verbose
+```
+
+`-old` 和 `-new` 必须能够解析为 commit。ripples 分析的是已提交的 Git tree，不包含工作区中未提交的修改。
+
+### 参数
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `-repo` | Git 仓库及 Go module 根目录 | `.` |
+| `-old` | 旧 commit ID 或 ref | 必填 |
+| `-new` | 新 commit ID 或 ref | 必填 |
+| `-output` | `simple`、`json`、`text` 或 `summary` | `simple` |
+| `-verbose` | 在 stderr 输出受影响 package 数量和耗时 | `false` |
+
+### 输出格式
+
+默认的 `simple` 格式每行输出一个 package，适合 shell 和 CI：
+
+```text
+cmd/server.main
+payment.payment
+```
+
+`json` 格式：
 
 ```json
 [
@@ -57,20 +118,33 @@ payment.payment
 ]
 ```
 
-## 缓存
-
-package snapshot 使用 Git tree、Go 版本和构建配置生成内容寻址缓存键。相同提交和构建配置的重复分析不需要再次解压和解析。
-
-默认缓存目录：
+`text` 和 `summary` 输出带数量的可读摘要：
 
 ```text
-<os.UserCacheDir>/ripples
+受影响的包: 2 个
+- cmd/server.main
+- payment.payment
 ```
 
-可通过绝对路径覆盖：
+## 缓存
+
+ripples 使用 Git tree、分析格式版本、Go toolchain 和构建配置生成内容寻址缓存键。相同 tree 和构建配置的重复分析可以直接复用 package snapshot。
+
+默认目录来自 Go 的 `os.UserCacheDir`：
+
+| 系统 | 默认目录 |
+| --- | --- |
+| macOS | `$HOME/Library/Caches/ripples` |
+| Linux | `$XDG_CACHE_HOME/ripples`，未设置时为 `$HOME/.cache/ripples` |
+| Windows | `%LocalAppData%\ripples` |
+
+可以通过绝对路径覆盖：
 
 ```bash
-RIPPLES_CACHE=/absolute/path/to/cache ./ripples ...
+RIPPLES_CACHE=/absolute/path/to/cache ripples \
+  -repo . \
+  -old HEAD~1 \
+  -new HEAD
 ```
 
 缓存键包含：
@@ -81,11 +155,11 @@ RIPPLES_CACHE=/absolute/path/to/cache ./ripples ...
 - `GOOS`、`GOARCH`、`CGO_ENABLED`
 - `GOFLAGS`、`GOEXPERIMENT`
 
-声明摘要还包含当前构建中的 Go AST、类型解析结果、`go:embed` 文件到变量声明的映射、其他编译输入、声明依赖图，以及 `go.mod`/`go.work`。
+snapshot 包含当前构建中的 Go AST、类型解析结果、`go:embed` 文件映射、其他编译输入和声明依赖图。`go.mod`、`go.work` 的内容变化也会参与影响判断。
 
-## 在 CI 中使用
+## 在 GitHub Actions 中使用
 
-下面的 GitHub Actions 示例会分析一个 PR 相对 base commit 影响的 package，并把 `cmd/server.main` 映射为后续 job 的开关。其他 binary 或 service 可以用相同方式继续映射。
+下面的示例下载最新 Release 二进制，校验 checksum，分析 PR 的 base/head commit，并把 `cmd/server.main` 映射为下游 job：
 
 ```yaml
 name: Impact
@@ -95,10 +169,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  # 替换为要使用的已发布 tag。
-  RIPPLES_VERSION: vX.Y.Z
 
 jobs:
   impact:
@@ -110,22 +180,24 @@ jobs:
         with:
           fetch-depth: 0
           path: source
+
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/ripples-cache
-          key: ripples-${{ env.RIPPLES_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.event.pull_request.head.sha }}
+          key: ripples-${{ runner.os }}-${{ runner.arch }}-${{ github.event.pull_request.head.sha }}
           restore-keys: |
-            ripples-${{ env.RIPPLES_VERSION }}-${{ runner.os }}-${{ runner.arch }}-
-      - name: Install ripples release
+            ripples-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install ripples
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_dir="$RUNNER_TEMP/ripples-release"
           mkdir -p "$release_dir"
-          gh release download "$RIPPLES_VERSION" \
+          gh release download \
             --repo jimyag/ripples \
-            --pattern "ripples_linux_amd64" \
-            --pattern "checksums.txt" \
+            --pattern ripples_linux_amd64 \
+            --pattern checksums.txt \
             --dir "$release_dir"
           (
             cd "$release_dir"
@@ -134,6 +206,7 @@ jobs:
           install -m 0755 \
             "$release_dir/ripples_linux_amd64" \
             "$RUNNER_TEMP/ripples"
+
       - name: Analyze affected packages
         id: targets
         env:
@@ -165,21 +238,22 @@ jobs:
       - run: go test ./cmd/server/... ./internal/server/...
 ```
 
-`fetch-depth: 0` 是必需的，否则 runner 上可能没有 base commit。`RIPPLES_CACHE` 必须是绝对路径；缓存内部已经包含 Git tree、Go toolchain 和构建配置，可以跨 PR 增量复用。CI 应固定 `RIPPLES_VERSION`，并使用 Release 中的 `checksums.txt` 校验下载的二进制。
+`fetch-depth: 0` 用于确保 runner 上存在 base commit。CI 会使用最新 Release，并校验其中的 `checksums.txt`；`RIPPLES_CACHE` 必须配置为绝对路径。
 
-## 行为边界
+## 分析边界
 
 - 默认不分析 `_test.go`。
-- 只分析当前 `GOOS`、`GOARCH` 和 build tags 对应的构建配置。
-- 注释-only 变更不会产生受影响 package。
+- 只分析当前 `GOOS`、`GOARCH` 和 build tags 对应的构建结果；需要覆盖多种构建配置时，应分别执行。
 - 当前 module 内会追踪接口参数和字段、变量赋值、工厂及多返回值、闭包、泛型透传、类型断言和 type switch、方法值和方法表达式，以及 slice、map、channel、range 和 `append` 中可由 AST 与类型信息确定的具体实现。
-- 标准库和 `go.mod` 依赖按黑盒处理，不遍历第三方函数体；本地具体值传入外部接口时，按接口方法契约传播，避免遗漏 binary/main。
-- 反射、`unsafe`、`plugin`、运行时注册和仅由外部配置决定的动态调用无法由 Go AST 完整确定，不猜测不存在静态证据的调用关系。
-- 新增和删除声明分别使用 new 和 old 依赖图。
-- `go.mod` 或 `go.work` 变化按保守策略影响所有本地 package。
-- 输出只表示 Go package 影响；binary、service 和部署单元应由调用方继续映射。
+- 标准库和 `go.mod` 中的第三方依赖按黑盒处理，不遍历其函数体；本地具体值传入外部接口时，会按接口方法契约继续传播。
+- 反射、`unsafe`、`plugin`、运行时注册和只由外部配置决定的动态调用无法由 Go AST 完整确定，ripples 不猜测缺少静态证据的调用关系。
+- 新增声明使用 new 依赖图，删除声明使用 old 依赖图。
+- `go.mod` 或 `go.work` 发生变化时，按保守策略影响所有本地 package。
+- 输出只表示 Go package 影响；binary、service、label 和部署单元由调用方映射。
 
 ## 开发
+
+安装开发工具并执行检查：
 
 ```bash
 task deps
@@ -197,11 +271,17 @@ task build
 task release-snapshot
 ```
 
+本地构建结果位于 `bin/ripples`：
+
+```bash
+task build
+```
+
 ## 发布
 
-推送 `v*` tag 后，GitHub Actions 会通过 GoReleaser 创建 Release，并上传 Linux、macOS 和 Windows 的 amd64/arm64 二进制及校验文件。
+推送 `v*` tag 后，Release workflow 会通过 GoReleaser 上传 Linux、macOS 和 Windows 的 amd64/arm64 原始二进制及 `checksums.txt`，不会打包为 tar 或 zip。
 
-发布前可以在本地验证：
+发布前可以验证配置和本地产物：
 
 ```bash
 task release-snapshot

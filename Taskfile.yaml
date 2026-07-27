@@ -5,7 +5,7 @@ vars:
   OUTPUT_DIR: bin
   LDFLAGS: "-s -w"
   GO_FILES:
-    sh: git ls-files "*.go" ":!:testdata/**" | tr "\n" " "
+    sh: git ls-files "*.go" | tr "\n" " "
 
 tasks:
   default:
