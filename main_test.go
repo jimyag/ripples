@@ -83,6 +83,60 @@ func Value() string { return "new" }
 	}
 }
 
+func TestRunAnalyzesNestedModuleWithRepositoryLocalReplace(t *testing.T) {
+	repo := initCLIRepository(t)
+	moduleDir := filepath.Join(repo, "src", "app")
+	writeCLIFile(t, moduleDir, "go.mod", `module example.com/app
+
+go 1.25
+
+require example.com/libs v0.0.0
+
+replace example.com/libs => ../../libs
+`)
+	writeCLIFile(t, repo, "libs/go.mod", "module example.com/libs\n\ngo 1.25\n")
+	writeCLIFile(t, repo, "libs/value.go", `package libs
+
+func Value() string { return "value" }
+`)
+	writeCLIFile(t, moduleDir, "service/service.go", `package service
+
+import "example.com/libs"
+
+func Value() string { return libs.Value() }
+`)
+	writeCLIFile(t, moduleDir, "cmd/server/main.go", `package main
+
+import "example.com/app/service"
+
+func main() { _ = service.Value() }
+`)
+	oldCommit := commitCLIRepository(t, repo, "old")
+	writeCLIFile(t, moduleDir, "service/service.go", `package service
+
+import "example.com/libs"
+
+func Value() string { return libs.Value() + "!" }
+`)
+	newCommit := commitCLIRepository(t, repo, "new")
+
+	t.Setenv("RIPPLES_CACHE", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"-repo", moduleDir,
+		"-old", oldCommit,
+		"-new", newCommit,
+		"-output", "simple",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	want := "cmd/server.main\nservice.service\n"
+	if stdout.String() != want {
+		t.Fatalf("run() stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
 func TestRunPrintsDOTImpactGraph(t *testing.T) {
 	repo := initCLIRepository(t)
 	writeCLIFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")

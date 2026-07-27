@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -176,7 +177,7 @@ func loadSnapshotPair(
 }
 
 // LoadSnapshot loads a package summary from cache or builds it from an
-// immutable Git archive.
+// immutable detached Git worktree.
 func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (*PackageSnapshot, error) {
 	revision, err := snapshot.Resolve(ctx, repoPath, ref)
 	if err != nil {
@@ -219,6 +220,7 @@ func analysisCacheKey(kind string, revision *snapshot.Revision) string {
 		analysisVersion,
 		kind,
 		revision.Tree,
+		filepath.ToSlash(revision.Subdir),
 		runtime.Version(),
 		os.Getenv("GOOS"),
 		os.Getenv("GOARCH"),

@@ -1,8 +1,6 @@
 package snapshot
 
 import (
-	"archive/tar"
-	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -38,6 +36,48 @@ func TestOpenExtractsRequestedCommitWithoutChangingWorktree(t *testing.T) {
 	}
 }
 
+func TestOpenPreservesRepositoryLayoutForNestedModule(t *testing.T) {
+	repo := initRepository(t)
+	moduleDir := filepath.Join(repo, "src", "app")
+	writeFile(t, filepath.Join(moduleDir, "go.mod"), `module example.com/app
+
+go 1.25
+
+require example.com/libs v0.0.0
+
+replace example.com/libs => ../../libs
+`)
+	writeFile(t, filepath.Join(repo, "libs", "go.mod"), "module example.com/libs\n\ngo 1.25\n")
+	writeFile(t, filepath.Join(repo, "libs", "value.go"), "package libs\n\nconst Value = 1\n")
+	commit := commitAll(t, repo, "initial")
+
+	source, err := Open(context.Background(), moduleDir, commit)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	worktreeDir := source.worktreeDir
+
+	assertFileContent(t, filepath.Join(source.Dir, "go.mod"), `module example.com/app
+
+go 1.25
+
+require example.com/libs v0.0.0
+
+replace example.com/libs => ../../libs
+`)
+	assertFileContent(t, filepath.Join(source.Dir, "..", "..", "libs", "value.go"), "package libs\n\nconst Value = 1\n")
+
+	if err := source.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := os.Stat(worktreeDir); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory still exists after Close(): %v", err)
+	}
+	if got := gitCommand(t, repo, "worktree", "list", "--porcelain"); strings.Contains(got, worktreeDir) {
+		t.Fatalf("worktree still registered after Close():\n%s", got)
+	}
+}
+
 func TestOpenRejectsUnknownRevision(t *testing.T) {
 	repo := initRepository(t)
 	writeFile(t, filepath.Join(repo, "value.txt"), "value")
@@ -63,37 +103,16 @@ func TestResolveDoesNotExtractFiles(t *testing.T) {
 	if revision.Tree == "" {
 		t.Fatal("Resolve().Tree is empty")
 	}
-}
-
-func TestExtractTarIgnoresPAXMetadata(t *testing.T) {
-	var archive bytes.Buffer
-	writer := tar.NewWriter(&archive)
-	if err := writer.WriteHeader(&tar.Header{
-		Name:     "pax_global_header",
-		Typeflag: tar.TypeXGlobalHeader,
-	}); err != nil {
+	wantRoot, err := filepath.EvalSymlinks(repo)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.WriteHeader(&tar.Header{
-		Name:     "value.txt",
-		Mode:     0o644,
-		Size:     int64(len("value")),
-		Typeflag: tar.TypeReg,
-	}); err != nil {
-		t.Fatal(err)
+	if revision.GitRoot != wantRoot {
+		t.Fatalf("Resolve().GitRoot = %q, want %q", revision.GitRoot, wantRoot)
 	}
-	if _, err := writer.Write([]byte("value")); err != nil {
-		t.Fatal(err)
+	if revision.Subdir != "." {
+		t.Fatalf("Resolve().Subdir = %q, want .", revision.Subdir)
 	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	dir := t.TempDir()
-	if err := extractTar(dir, &archive); err != nil {
-		t.Fatalf("extractTar() error = %v", err)
-	}
-	assertFileContent(t, filepath.Join(dir, "value.txt"), "value")
 }
 
 func initRepository(t *testing.T) string {

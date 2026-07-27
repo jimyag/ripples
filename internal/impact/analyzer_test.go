@@ -118,6 +118,21 @@ func TestLoadSnapshotPairReusesSameTree(t *testing.T) {
 	}
 }
 
+func TestAnalysisCacheKeyIncludesRepositorySubdirectory(t *testing.T) {
+	first := analysisCacheKey("package-graph", &snapshot.Revision{
+		Tree:   "shared-tree",
+		Subdir: filepath.Join("src", "first"),
+	})
+	second := analysisCacheKey("package-graph", &snapshot.Revision{
+		Tree:   "shared-tree",
+		Subdir: filepath.Join("src", "second"),
+	})
+
+	if first == second {
+		t.Fatal("analysisCacheKey() reused a cache key for different repository subdirectories")
+	}
+}
+
 func TestTransitiveDependentsDeduplicatesConvergingChanges(t *testing.T) {
 	changed := map[string]struct{}{
 		"change-a": {},
