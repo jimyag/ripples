@@ -32,7 +32,8 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 		repoPath,
 		oldRef,
 		newRef,
-		a.LoadSnapshot,
+		snapshot.Resolve,
+		a.loadResolvedSnapshot,
 	)
 	if err != nil {
 		return nil, err
@@ -71,13 +72,37 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 	return results, nil
 }
 
-type snapshotLoader func(context.Context, string, string) (*PackageSnapshot, error)
+type revisionResolver func(context.Context, string, string) (*snapshot.Revision, error)
+type snapshotLoader func(context.Context, *snapshot.Revision) (*PackageSnapshot, error)
 
 func loadSnapshotPair(
 	ctx context.Context,
 	repoPath, oldRef, newRef string,
+	resolve revisionResolver,
 	load snapshotLoader,
 ) (*PackageSnapshot, *PackageSnapshot, error) {
+	revisions := make([]*snapshot.Revision, 2)
+	refs := []string{oldRef, newRef}
+	labels := []string{"old", "new"}
+	if err := parallelFor(2, func(index int) error {
+		revision, err := resolve(ctx, repoPath, refs[index])
+		if err != nil {
+			return fmt.Errorf("load %s snapshot: %w", labels[index], err)
+		}
+		revisions[index] = revision
+		return nil
+	}); err != nil {
+		return nil, nil, err
+	}
+
+	if revisions[0].Tree == revisions[1].Tree {
+		packageSnapshot, err := load(ctx, revisions[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("load old snapshot: %w", err)
+		}
+		return packageSnapshot, packageSnapshot, nil
+	}
+
 	var (
 		oldSnapshot *PackageSnapshot
 		newSnapshot *PackageSnapshot
@@ -88,11 +113,11 @@ func loadSnapshotPair(
 	wait.Add(2)
 	go func() {
 		defer wait.Done()
-		oldSnapshot, oldErr = load(ctx, repoPath, oldRef)
+		oldSnapshot, oldErr = load(ctx, revisions[0])
 	}()
 	go func() {
 		defer wait.Done()
-		newSnapshot, newErr = load(ctx, repoPath, newRef)
+		newSnapshot, newErr = load(ctx, revisions[1])
 	}()
 	wait.Wait()
 
@@ -112,7 +137,10 @@ func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (*Pac
 	if err != nil {
 		return nil, err
 	}
+	return a.loadResolvedSnapshot(ctx, revision)
+}
 
+func (a *Analyzer) loadResolvedSnapshot(ctx context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
 	key := snapshot.Key(
 		analysisVersion,
 		revision.Tree,

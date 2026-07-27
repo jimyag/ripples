@@ -24,10 +24,13 @@ func TestLoadSnapshotPairRunsConcurrently(t *testing.T) {
 		})
 	}
 	defer releaseLoads()
-	load := func(_ context.Context, _, ref string) (*PackageSnapshot, error) {
-		started <- ref
+	resolve := func(_ context.Context, repoPath, ref string) (*snapshot.Revision, error) {
+		return &snapshot.Revision{RepoPath: repoPath, Commit: ref, Tree: ref}, nil
+	}
+	load := func(_ context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
+		started <- revision.Commit
 		<-release
-		return &PackageSnapshot{ModuleHash: ref}, nil
+		return &PackageSnapshot{ModuleHash: revision.Commit}, nil
 	}
 
 	type result struct {
@@ -42,6 +45,7 @@ func TestLoadSnapshotPairRunsConcurrently(t *testing.T) {
 			"repo",
 			"old",
 			"new",
+			resolve,
 			load,
 		)
 		done <- result{old: oldSnapshot, new: newSnapshot, err: err}
@@ -78,6 +82,39 @@ func TestLoadSnapshotPairRunsConcurrently(t *testing.T) {
 	}
 	if _, ok := refs["new"]; !ok {
 		t.Fatal("new snapshot did not start")
+	}
+}
+
+func TestLoadSnapshotPairReusesSameTree(t *testing.T) {
+	resolve := func(_ context.Context, repoPath, ref string) (*snapshot.Revision, error) {
+		return &snapshot.Revision{
+			RepoPath: repoPath,
+			Commit:   ref,
+			Tree:     "shared-tree",
+		}, nil
+	}
+	loads := 0
+	load := func(_ context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
+		loads++
+		return &PackageSnapshot{Tree: revision.Tree}, nil
+	}
+
+	oldSnapshot, newSnapshot, err := loadSnapshotPair(
+		context.Background(),
+		"repo",
+		"old-alias",
+		"new-alias",
+		resolve,
+		load,
+	)
+	if err != nil {
+		t.Fatalf("loadSnapshotPair() error = %v", err)
+	}
+	if loads != 1 {
+		t.Fatalf("snapshot loads = %d, want 1", loads)
+	}
+	if oldSnapshot != newSnapshot {
+		t.Fatal("same tree returned different snapshots")
 	}
 }
 
