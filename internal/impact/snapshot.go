@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"go/types"
 	"io"
@@ -112,9 +111,18 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 }
 
 func summarizePackage(root, modulePath string, pkg *gopackages.Package) (Package, error) {
+	if len(pkg.Syntax) != len(pkg.CompiledGoFiles) {
+		return Package{}, fmt.Errorf(
+			"hash package %s: got %d syntax trees for %d compiled Go files",
+			pkg.PkgPath,
+			len(pkg.Syntax),
+			len(pkg.CompiledGoFiles),
+		)
+	}
+
 	fileHashes := make([]string, 0, len(pkg.CompiledGoFiles)+len(pkg.EmbedFiles)+len(pkg.OtherFiles))
-	for _, filename := range pkg.CompiledGoFiles {
-		hash, err := goFileHash(filename)
+	for index := range pkg.CompiledGoFiles {
+		hash, err := astFileHash(pkg.Syntax[index], pkg.Fset)
 		if err != nil {
 			return Package{}, fmt.Errorf("hash package %s: %w", pkg.PkgPath, err)
 		}
@@ -160,13 +168,7 @@ func summarizePackage(root, modulePath string, pkg *gopackages.Package) (Package
 	}, nil
 }
 
-func goFileHash(filename string) (string, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filename, nil, parser.SkipObjectResolution)
-	if err != nil {
-		return "", err
-	}
-
+func astFileHash(file *ast.File, fset *token.FileSet) (string, error) {
 	hash := sha256.New()
 	if err := ast.Fprint(hash, fset, file, astFieldFilter); err != nil {
 		return "", err
@@ -175,7 +177,8 @@ func goFileHash(filename string) (string, error) {
 }
 
 func astFieldFilter(name string, value reflect.Value) bool {
-	if name == "Doc" || name == "Comment" || name == "Comments" {
+	if name == "Doc" || name == "Comment" || name == "Comments" ||
+		name == "Obj" || name == "Scope" || name == "Unresolved" {
 		return false
 	}
 	return value.Type() != reflect.TypeFor[token.Pos]()
