@@ -84,15 +84,12 @@ func TestReporterDOTPrintsReversePackageRelationships(t *testing.T) {
 		t.Fatalf("Print(dot) error = %v", err)
 	}
 	want := `digraph ripples {
-  rankdir="LR";
-  node [shape="box"];
-  "example.com/app/cmd/server" [label="cmd/server.main"];
-  "example.com/app/internal/order" [label="internal/order.order"];
-  "example.com/app/payment" [label="payment.payment", color="#cf222e", penwidth="2"];
-  "example.com/app/internal/order" -> "example.com/app/cmd/server";
-  "example.com/app/payment" -> "example.com/app/internal/order";
-}
-`
+	rankdir="LR";
+	n1[label="cmd/server.main",shape="box"];
+	n2[label="internal/order.order",shape="box"];
+	n3[color="#cf222e",label="payment.payment",penwidth="2",shape="box"];
+	n2->n1;
+	n3->n2;` + "\n\t\n}\n"
 	if output.String() != want {
 		t.Fatalf("Print(dot) = %q, want %q", output.String(), want)
 	}

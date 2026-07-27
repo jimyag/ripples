@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 
+	"github.com/emicklei/dot"
 	"github.com/jimyag/ripples/internal/impact"
 )
 
@@ -100,28 +100,16 @@ func (r *Reporter) printDOT() error {
 		changed[packagePath] = struct{}{}
 	}
 
-	if _, err := fmt.Fprintln(r.writer, "digraph ripples {"); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(r.writer, `  rankdir="LR";`); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(r.writer, `  node [shape="box"];`); err != nil {
-		return err
-	}
+	graph := dot.NewGraph(dot.Directed).ID("ripples")
+	graph.Attr("rankdir", "LR")
+	nodes := make(map[string]dot.Node, len(packages))
 	for _, pkg := range packages {
-		attributes := []string{"label=" + dotQuote(displayName(pkg))}
+		node := graph.Node(pkg.Path).Label(displayName(pkg)).Box()
 		if _, ok := changed[pkg.Path]; ok {
-			attributes = append(attributes, `color="#cf222e"`, `penwidth="2"`)
+			node.Attr("color", "#cf222e")
+			node.Attr("penwidth", 2)
 		}
-		if _, err := fmt.Fprintf(
-			r.writer,
-			"  %s [%s];\n",
-			dotQuote(pkg.Path),
-			strings.Join(attributes, ", "),
-		); err != nil {
-			return err
-		}
+		nodes[pkg.Path] = node
 	}
 	edges := append([]impact.PackageEdge(nil), r.analysis.Edges...)
 	sort.Slice(edges, func(i, j int) bool {
@@ -131,27 +119,19 @@ func (r *Reporter) printDOT() error {
 		return edges[i].To < edges[j].To
 	})
 	for _, edge := range edges {
-		if _, err := fmt.Fprintf(
-			r.writer,
-			"  %s -> %s;\n",
-			dotQuote(edge.From),
-			dotQuote(edge.To),
-		); err != nil {
-			return err
+		from, fromOK := nodes[edge.From]
+		to, toOK := nodes[edge.To]
+		if !fromOK || !toOK {
+			return fmt.Errorf(
+				"影响图关系引用未知 package: %s -> %s",
+				edge.From,
+				edge.To,
+			)
 		}
+		graph.Edge(from, to)
 	}
-	_, err := fmt.Fprintln(r.writer, "}")
+	_, err := io.WriteString(r.writer, graph.String())
 	return err
-}
-
-func dotQuote(value string) string {
-	replacer := strings.NewReplacer(
-		`\`, `\\`,
-		`"`, `\"`,
-		"\n", `\n`,
-		"\r", `\r`,
-	)
-	return `"` + replacer.Replace(value) + `"`
 }
 
 func displayName(pkg impact.Package) string {

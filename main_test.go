@@ -115,13 +115,10 @@ func Value() string { return "new" }
 		t.Fatalf("run() code = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	want := `digraph ripples {
-  rankdir="LR";
-  node [shape="box"];
-  "example.com/app/cmd/server" [label="cmd/server.main"];
-  "example.com/app/lib" [label="lib.lib", color="#cf222e", penwidth="2"];
-  "example.com/app/lib" -> "example.com/app/cmd/server";
-}
-`
+	rankdir="LR";
+	n1[label="cmd/server.main",shape="box"];
+	n2[color="#cf222e",label="lib.lib",penwidth="2",shape="box"];
+	n2->n1;` + "\n\t\n}\n"
 	if stdout.String() != want {
 		t.Fatalf("run() stdout = %q, want %q", stdout.String(), want)
 	}
