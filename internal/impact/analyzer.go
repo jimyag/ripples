@@ -72,8 +72,10 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 	return results, nil
 }
 
-type revisionResolver func(context.Context, string, string) (*snapshot.Revision, error)
-type snapshotLoader func(context.Context, *snapshot.Revision) (*PackageSnapshot, error)
+type (
+	revisionResolver func(context.Context, string, string) (*snapshot.Revision, error)
+	snapshotLoader   func(context.Context, *snapshot.Revision) (*PackageSnapshot, error)
+)
 
 func loadSnapshotPair(
 	ctx context.Context,
