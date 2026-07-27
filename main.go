@@ -23,7 +23,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("ripples", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	repoPath := flags.String("repo", ".", "Git 仓库路径")
+	repoPath := flags.String("repo", ".", "Git 仓库内待分析的 Go module 目录")
 	oldCommit := flags.String("old", "", "旧 commit ID 或 ref（必填）")
 	newCommit := flags.String("new", "", "新 commit ID 或 ref（必填）")
 	outputType := flags.String("output", "simple", "输出格式: simple, text, json, summary, dot")
