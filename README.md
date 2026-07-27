@@ -82,6 +82,12 @@ ripples \
 ripples -repo . -old HEAD~1 -new HEAD -verbose
 ```
 
+查看当前版本和构建信息：
+
+```bash
+ripples --version
+```
+
 `-old` 和 `-new` 必须能够解析为 commit。ripples 分析的是已提交的 Git tree，不包含工作区中未提交的修改。
 
 ### 参数
@@ -288,3 +294,7 @@ task build
 ```bash
 task release-snapshot
 ```
+
+## License
+
+本项目基于 [GNU General Public License v3.0](LICENSE) 发布。

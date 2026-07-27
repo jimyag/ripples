@@ -8,6 +8,8 @@ import (
 	"os"
 	"time"
 
+	_ "github.com/jimmicro/version"
+
 	"github.com/jimyag/ripples/internal/impact"
 	"github.com/jimyag/ripples/internal/output"
 	"github.com/jimyag/ripples/internal/snapshot"

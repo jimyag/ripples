@@ -2,12 +2,38 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestBinaryPrintsVersion(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "ripples")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+
+	command := exec.Command(binary, "--version")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ripples --version: %v\n%s", err, output)
+	}
+	var info struct {
+		GitTag    string `json:"gitTag"`
+		BuildTime string `json:"buildTime"`
+		GoVersion string `json:"goVersion"`
+	}
+	if err := json.Unmarshal(output, &info); err != nil {
+		t.Fatalf("ripples --version output = %q: %v", output, err)
+	}
+	if info.GitTag == "" || info.BuildTime == "" || info.GoVersion == "" {
+		t.Fatalf("ripples --version output has empty fields: %+v", info)
+	}
+}
 
 func TestRunRequiresRevisions(t *testing.T) {
 	var stdout, stderr bytes.Buffer

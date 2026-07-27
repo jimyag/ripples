@@ -13,6 +13,8 @@ builds:
       - -buildvcs=true
     ldflags:
       - -s -w
+      - -X github.com/jimmicro/version.GitTag={{ .Tag }}
+      - -X github.com/jimmicro/version.BuildTime={{ .Date }}
     goos:
       - linux
       - darwin
