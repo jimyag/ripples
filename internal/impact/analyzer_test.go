@@ -81,6 +81,29 @@ func TestLoadSnapshotPairRunsConcurrently(t *testing.T) {
 	}
 }
 
+func TestTransitiveDependentsDeduplicatesConvergingChanges(t *testing.T) {
+	changed := map[string]struct{}{
+		"change-a": {},
+		"change-b": {},
+	}
+	reverse := map[string]map[string]struct{}{
+		"change-a": {"shared-c": {}},
+		"change-b": {"shared-c": {}},
+		"shared-c": {"consumer-d": {}},
+	}
+
+	got := transitiveDependents(changed, reverse)
+	want := []string{"change-a", "change-b", "consumer-d", "shared-c"}
+	if len(got) != len(want) {
+		t.Fatalf("transitiveDependents() = %v, want %v", got, want)
+	}
+	for _, id := range want {
+		if _, ok := got[id]; !ok {
+			t.Fatalf("transitiveDependents() missing %q: %v", id, got)
+		}
+	}
+}
+
 func TestAnalyzeReturnsChangedDeclarationAndTransitiveCallers(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "payment/payment.go", `package payment

@@ -36,14 +36,19 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 	globalBindings := packageInterfaceBindings(declarations, &resolver)
 	resolver.fieldBindings = packageFieldBindings(declarations, globalBindings, &resolver)
 
-	symbols := make(map[string]Symbol, len(declarations))
-	for _, declaration := range declarations {
+	type declarationSummary struct {
+		symbol       Symbol
+		dependencies map[string]struct{}
+	}
+	summaries := make([]declarationSummary, len(declarations))
+	if err := parallelFor(len(declarations), func(index int) error {
+		declaration := declarations[index]
 		hash := declaration.hash
 		if hash == "" {
 			var err error
 			hash, err = astHash(declaration.hashNode, declaration.pkg.Fset)
 			if err != nil {
-				return nil, fmt.Errorf("hash declaration %s: %w", declaration.id, err)
+				return fmt.Errorf("hash declaration %s: %w", declaration.id, err)
 			}
 		}
 
@@ -62,6 +67,23 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 				return true
 			})
 		}
+
+		summaries[index] = declarationSummary{
+			symbol: Symbol{
+				ID:          declaration.id,
+				PackagePath: declaration.pkg.PkgPath,
+				Hash:        hash,
+			},
+			dependencies: dependencies,
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	symbols := make(map[string]Symbol, len(declarations))
+	for index, declaration := range declarations {
+		summary := summaries[index]
 		dispatchSymbols := interfaceDependencies(
 			declaration,
 			packages,
@@ -72,16 +94,11 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 			&resolver,
 		)
 		for _, dispatch := range dispatchSymbols {
-			dependencies[dispatch.ID] = struct{}{}
+			summary.dependencies[dispatch.ID] = struct{}{}
 			symbols[dispatch.ID] = dispatch
 		}
-
-		symbols[declaration.id] = Symbol{
-			ID:           declaration.id,
-			PackagePath:  declaration.pkg.PkgPath,
-			Hash:         hash,
-			Dependencies: sortedSet(dependencies),
-		}
+		summary.symbol.Dependencies = sortedSet(summary.dependencies)
+		symbols[summary.symbol.ID] = summary.symbol
 	}
 	for packagePath, pkg := range packages {
 		id := packageObjectID(packagePath, "package", "$content")

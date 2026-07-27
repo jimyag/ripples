@@ -96,11 +96,18 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 		Packages:   make(map[string]Package, len(loaded)),
 		Symbols:    make(map[string]Symbol),
 	}
-	for _, loadedPackage := range loaded {
-		pkg, err := summarizePackage(source.Dir, modulePath, loadedPackage)
+	summaries := make([]Package, len(loaded))
+	if err := parallelFor(len(loaded), func(index int) error {
+		pkg, err := summarizePackage(source.Dir, modulePath, loaded[index])
 		if err != nil {
-			return PackageSnapshot{}, err
+			return err
 		}
+		summaries[index] = pkg
+		return nil
+	}); err != nil {
+		return PackageSnapshot{}, err
+	}
+	for _, pkg := range summaries {
 		result.Packages[pkg.Path] = pkg
 	}
 	result.Symbols, err = summarizeSymbols(source.Dir, loaded, result.Packages)
