@@ -978,6 +978,16 @@ func (resolver *valueFlowResolver) callResultTypes(
 			if signature == nil {
 				return nil
 			}
+			key := fmt.Sprintf("function-value:%p::%d", literal, resultIndex)
+			if resolver.resolving == nil {
+				resolver.resolving = make(map[string]struct{})
+			}
+			if _, active := resolver.resolving[key]; active {
+				return nil
+			}
+			resolver.resolving[key] = struct{}{}
+			defer delete(resolver.resolving, key)
+
 			bindings := make(map[types.Object][]types.Type, len(current))
 			for currentObject, candidates := range current {
 				bindings[currentObject] = append([]types.Type(nil), candidates...)

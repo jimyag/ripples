@@ -133,6 +133,79 @@ func TestAnalysisCacheKeyIncludesRepositorySubdirectory(t *testing.T) {
 	}
 }
 
+func TestAnalyzeHandlesRecursiveFunctionValue(t *testing.T) {
+	const helperEnv = "RIPPLES_RECURSIVE_FUNCTION_VALUE_HELPER"
+	if os.Getenv(helperEnv) != "1" {
+		command := exec.Command(os.Args[0], "-test.run=^TestAnalyzeHandlesRecursiveFunctionValue$")
+		command.Env = append(os.Environ(), helperEnv+"=1", "GOTRACEBACK=none")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("recursive function value analysis failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	repo := initModule(t)
+	writeModuleFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() {}
+`)
+	writeModuleFile(t, repo, "factory/factory.go", `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+var wrap func(runner.Service, bool) runner.Service
+
+func init() {
+	wrap = func(current runner.Service, again bool) runner.Service {
+		if again {
+			return wrap(current, false)
+		}
+		return current
+	}
+}
+
+func New() runner.Service {
+	return wrap(service.Service{}, true)
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.New().Run()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Service struct{}
+
+func (Service) Run() { println("changed") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"cmd/server.main", "service.service"})
+}
+
 func TestTransitiveDependentsDeduplicatesConvergingChanges(t *testing.T) {
 	changed := map[string]struct{}{
 		"change-a": {},
