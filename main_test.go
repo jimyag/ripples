@@ -83,6 +83,50 @@ func Value() string { return "new" }
 	}
 }
 
+func TestRunPrintsDOTImpactGraph(t *testing.T) {
+	repo := initCLIRepository(t)
+	writeCLIFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")
+	writeCLIFile(t, repo, "lib/lib.go", `package lib
+
+func Value() string { return "old" }
+`)
+	writeCLIFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/lib"
+
+func main() { _ = lib.Value() }
+`)
+	oldCommit := commitCLIRepository(t, repo, "old")
+	writeCLIFile(t, repo, "lib/lib.go", `package lib
+
+func Value() string { return "new" }
+`)
+	newCommit := commitCLIRepository(t, repo, "new")
+
+	t.Setenv("RIPPLES_CACHE", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"-repo", repo,
+		"-old", oldCommit,
+		"-new", newCommit,
+		"-output", "dot",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	want := `digraph ripples {
+  rankdir="LR";
+  node [shape="box"];
+  "example.com/app/cmd/server" [label="cmd/server.main"];
+  "example.com/app/lib" [label="lib.lib", color="#cf222e", penwidth="2"];
+  "example.com/app/lib" -> "example.com/app/cmd/server";
+}
+`
+	if stdout.String() != want {
+		t.Fatalf("run() stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
 func initCLIRepository(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

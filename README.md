@@ -97,7 +97,7 @@ ripples --version
 | `-repo` | Git 仓库及 Go module 根目录 | `.` |
 | `-old` | 旧 commit ID 或 ref | 必填 |
 | `-new` | 新 commit ID 或 ref | 必填 |
-| `-output` | `simple`、`json`、`text` 或 `summary` | `simple` |
+| `-output` | `simple`、`json`、`text`、`summary` 或 `dot` | `simple` |
 | `-verbose` | 在 stderr 输出受影响 package 数量和耗时 | `false` |
 
 ### 输出格式
@@ -131,6 +131,15 @@ payment.payment
 - cmd/server.main
 - payment.payment
 ```
+
+`dot` 输出本次影响的 package 反向关系子图。边从被依赖的 package 指向使用它的 package，红色边框表示包含变更声明的 package：
+
+```bash
+ripples -repo . -old HEAD~1 -new HEAD -output dot > impact.dot
+dot -Tsvg impact.dot -o impact.svg
+```
+
+生成 DOT 文本不依赖 Graphviz；只有转换成 SVG、PNG 等图片时才需要安装 `dot`。图中只包含本次变更涉及的 package，关系来自同一次声明级影响传播，而不是单独生成的 import 图。
 
 ## 缓存
 

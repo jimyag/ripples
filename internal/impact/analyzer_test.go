@@ -141,6 +141,109 @@ func TestTransitiveDependentsDeduplicatesConvergingChanges(t *testing.T) {
 	}
 }
 
+func TestPackageImpactGraphCollapsesDeclarationAndDispatchEdges(t *testing.T) {
+	const (
+		paymentPath = "example.com/app/payment"
+		servicePath = "example.com/app/service"
+		serverPath  = "example.com/app/cmd/server"
+	)
+	paymentMethod := paymentPath + "::func::Service.Run"
+	dispatch := paymentPath + "::interface-trace::0"
+	serviceFunction := servicePath + "::func::Execute"
+	serverMain := serverPath + "::func::main"
+	packageSnapshot := &PackageSnapshot{
+		Symbols: map[string]Symbol{
+			paymentMethod: {
+				ID:          paymentMethod,
+				PackagePath: paymentPath,
+			},
+			dispatch: {
+				ID:           dispatch,
+				PackagePath:  paymentPath,
+				Dependencies: []string{paymentMethod},
+			},
+			serviceFunction: {
+				ID:           serviceFunction,
+				PackagePath:  servicePath,
+				Dependencies: []string{dispatch},
+			},
+			serverMain: {
+				ID:           serverMain,
+				PackagePath:  serverPath,
+				Dependencies: []string{serviceFunction},
+			},
+		},
+	}
+	changed := map[string]struct{}{paymentMethod: {}}
+	reverse := reverseDependencies(packageSnapshot)
+	affected := transitiveDependents(changed, reverse)
+
+	changedPackages, edges := packageImpactGraph(
+		changed,
+		affected,
+		reverse,
+		packageSnapshot,
+	)
+	if want := []string{paymentPath}; !reflect.DeepEqual(changedPackages, want) {
+		t.Fatalf("changed packages = %v, want %v", changedPackages, want)
+	}
+	wantEdges := []PackageEdge{
+		{From: paymentPath, To: servicePath},
+		{From: servicePath, To: serverPath},
+	}
+	if !reflect.DeepEqual(edges, wantEdges) {
+		t.Fatalf("edges = %v, want %v", edges, wantEdges)
+	}
+}
+
+func TestPackageImpactGraphIncludesDeletedDependencyEdges(t *testing.T) {
+	const (
+		paymentPath = "example.com/app/payment"
+		servicePath = "example.com/app/service"
+	)
+	paymentFunction := paymentPath + "::func::Removed"
+	serviceFunction := servicePath + "::func::Execute"
+	oldSnapshot := &PackageSnapshot{
+		Symbols: map[string]Symbol{
+			paymentFunction: {
+				ID:          paymentFunction,
+				PackagePath: paymentPath,
+			},
+			serviceFunction: {
+				ID:           serviceFunction,
+				PackagePath:  servicePath,
+				Dependencies: []string{paymentFunction},
+			},
+		},
+	}
+	newSnapshot := &PackageSnapshot{
+		Symbols: map[string]Symbol{
+			serviceFunction: {
+				ID:          serviceFunction,
+				PackagePath: servicePath,
+			},
+		},
+	}
+	changed := map[string]struct{}{paymentFunction: {}}
+	reverse := reverseDependencies(oldSnapshot, newSnapshot)
+	affected := transitiveDependents(changed, reverse)
+
+	changedPackages, edges := packageImpactGraph(
+		changed,
+		affected,
+		reverse,
+		oldSnapshot,
+		newSnapshot,
+	)
+	if want := []string{paymentPath}; !reflect.DeepEqual(changedPackages, want) {
+		t.Fatalf("changed packages = %v, want %v", changedPackages, want)
+	}
+	wantEdges := []PackageEdge{{From: paymentPath, To: servicePath}}
+	if !reflect.DeepEqual(edges, wantEdges) {
+		t.Fatalf("edges = %v, want %v", edges, wantEdges)
+	}
+}
+
 func TestAnalyzeReturnsChangedDeclarationAndTransitiveCallers(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "payment/payment.go", `package payment

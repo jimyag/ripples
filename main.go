@@ -26,7 +26,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	repoPath := flags.String("repo", ".", "Git 仓库路径")
 	oldCommit := flags.String("old", "", "旧 commit ID 或 ref（必填）")
 	newCommit := flags.String("new", "", "新 commit ID 或 ref（必填）")
-	outputType := flags.String("output", "simple", "输出格式: simple, text, json, summary")
+	outputType := flags.String("output", "simple", "输出格式: simple, text, json, summary, dot")
 	verbose := flags.Bool("verbose", false, "显示分析耗时")
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -45,19 +45,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	started := time.Now()
 	analyzer := impact.NewAnalyzer(cache)
-	results, err := analyzer.Analyze(context.Background(), *repoPath, *oldCommit, *newCommit)
+	analysis, err := analyzer.AnalyzeDetailed(context.Background(), *repoPath, *oldCommit, *newCommit)
 	if err != nil {
 		fmt.Fprintf(stderr, "分析失败: %v\n", err)
 		return 1
 	}
 
-	reporter := output.NewReporter(stdout, results)
+	reporter := output.NewAnalysisReporter(stdout, analysis)
 	if err := reporter.Print(*outputType); err != nil {
 		fmt.Fprintf(stderr, "输出失败: %v\n", err)
 		return 1
 	}
 	if *verbose {
-		fmt.Fprintf(stderr, "分析完成: %d 个受影响包，耗时 %s\n", len(results), time.Since(started))
+		fmt.Fprintf(stderr, "分析完成: %d 个受影响包，耗时 %s\n", len(analysis.Packages), time.Since(started))
 	}
 	return 0
 }

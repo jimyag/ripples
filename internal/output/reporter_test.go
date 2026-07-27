@@ -46,6 +46,65 @@ func TestReporterJSONOnlyExposesPathAndName(t *testing.T) {
 	}
 }
 
+func TestReporterDOTPrintsReversePackageRelationships(t *testing.T) {
+	analysis := impact.Analysis{
+		Packages: []impact.Package{
+			{
+				Path:         "example.com/app/cmd/server",
+				RelativePath: "cmd/server",
+				Name:         "main",
+			},
+			{
+				Path:         "example.com/app/payment",
+				RelativePath: "payment",
+				Name:         "payment",
+			},
+			{
+				Path:         "example.com/app/internal/order",
+				RelativePath: "internal/order",
+				Name:         "order",
+			},
+		},
+		ChangedPackages: []string{"example.com/app/payment"},
+		Edges: []impact.PackageEdge{
+			{
+				From: "example.com/app/internal/order",
+				To:   "example.com/app/cmd/server",
+			},
+			{
+				From: "example.com/app/payment",
+				To:   "example.com/app/internal/order",
+			},
+		},
+	}
+
+	var output bytes.Buffer
+	err := NewAnalysisReporter(&output, analysis).Print("dot")
+	if err != nil {
+		t.Fatalf("Print(dot) error = %v", err)
+	}
+	want := `digraph ripples {
+  rankdir="LR";
+  node [shape="box"];
+  "example.com/app/cmd/server" [label="cmd/server.main"];
+  "example.com/app/internal/order" [label="internal/order.order"];
+  "example.com/app/payment" [label="payment.payment", color="#cf222e", penwidth="2"];
+  "example.com/app/internal/order" -> "example.com/app/cmd/server";
+  "example.com/app/payment" -> "example.com/app/internal/order";
+}
+`
+	if output.String() != want {
+		t.Fatalf("Print(dot) = %q, want %q", output.String(), want)
+	}
+}
+
+func TestReporterDOTRequiresDetailedAnalysis(t *testing.T) {
+	err := NewReporter(&bytes.Buffer{}, reporterPackages).Print("dot")
+	if err == nil {
+		t.Fatal("Print(dot) error = nil, want detailed analysis error")
+	}
+}
+
 func TestReporterRejectsUnknownFormat(t *testing.T) {
 	err := NewReporter(&bytes.Buffer{}, reporterPackages).Print("xml")
 	if err == nil {

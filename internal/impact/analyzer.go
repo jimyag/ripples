@@ -19,6 +19,20 @@ type Analyzer struct {
 	cache *snapshot.Cache
 }
 
+// Analysis contains affected packages and the reverse package relationships
+// that explain how an impact propagates from changed packages to their users.
+type Analysis struct {
+	Packages        []Package
+	ChangedPackages []string
+	Edges           []PackageEdge
+}
+
+// PackageEdge points from a dependency package to a package that uses it.
+type PackageEdge struct {
+	From string
+	To   string
+}
+
 // NewAnalyzer creates an analyzer backed by the persistent cache.
 func NewAnalyzer(cache *snapshot.Cache) *Analyzer {
 	return &Analyzer{cache: cache}
@@ -27,6 +41,16 @@ func NewAnalyzer(cache *snapshot.Cache) *Analyzer {
 // Analyze returns changed packages and all packages that directly or
 // transitively import them in either snapshot.
 func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string) ([]Package, error) {
+	analysis, err := a.AnalyzeDetailed(ctx, repoPath, oldRef, newRef)
+	if err != nil {
+		return nil, err
+	}
+	return analysis.Packages, nil
+}
+
+// AnalyzeDetailed returns affected packages together with the package-level
+// reverse dependency subgraph used to derive them.
+func (a *Analyzer) AnalyzeDetailed(ctx context.Context, repoPath, oldRef, newRef string) (Analysis, error) {
 	oldSnapshot, newSnapshot, err := loadSnapshotPair(
 		ctx,
 		repoPath,
@@ -36,14 +60,14 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 		a.loadResolvedSnapshot,
 	)
 	if err != nil {
-		return nil, err
+		return Analysis{}, err
 	}
 
 	moduleChanges := make(map[string]struct{})
 	if oldSnapshot.ModuleHash != newSnapshot.ModuleHash {
 		oldModules, newModules, err := a.loadModuleSnapshotPair(ctx, repoPath, oldRef, newRef)
 		if err != nil {
-			return nil, err
+			return Analysis{}, err
 		}
 		moduleChanges = changedModulePackages(oldModules, newModules)
 	}
@@ -77,7 +101,18 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 		}
 		return results[i].Path < results[j].Path
 	})
-	return results, nil
+	changedPackages, edges := packageImpactGraph(
+		changed,
+		affectedSymbols,
+		reverse,
+		oldSnapshot,
+		newSnapshot,
+	)
+	return Analysis{
+		Packages:        results,
+		ChangedPackages: changedPackages,
+		Edges:           edges,
+	}, nil
 }
 
 type (
@@ -293,4 +328,58 @@ func transitiveDependents(changed map[string]struct{}, reverse map[string]map[st
 		}
 	}
 	return affected
+}
+
+func packageImpactGraph(
+	changed, affected map[string]struct{},
+	reverse map[string]map[string]struct{},
+	snapshots ...*PackageSnapshot,
+) ([]string, []PackageEdge) {
+	symbols := make(map[string]Symbol)
+	for _, packageSnapshot := range snapshots {
+		for id, symbol := range packageSnapshot.Symbols {
+			symbols[id] = symbol
+		}
+	}
+
+	changedPackages := make(map[string]struct{})
+	for id := range changed {
+		if symbol, ok := symbols[id]; ok {
+			changedPackages[symbol.PackagePath] = struct{}{}
+		}
+	}
+
+	edges := make(map[PackageEdge]struct{})
+	for dependencyID := range affected {
+		dependency, ok := symbols[dependencyID]
+		if !ok {
+			continue
+		}
+		for dependentID := range reverse[dependencyID] {
+			if _, included := affected[dependentID]; !included {
+				continue
+			}
+			dependent, ok := symbols[dependentID]
+			if !ok || dependency.PackagePath == dependent.PackagePath {
+				continue
+			}
+			edges[PackageEdge{
+				From: dependency.PackagePath,
+				To:   dependent.PackagePath,
+			}] = struct{}{}
+		}
+	}
+
+	changedPaths := sortedSet(changedPackages)
+	resultEdges := make([]PackageEdge, 0, len(edges))
+	for edge := range edges {
+		resultEdges = append(resultEdges, edge)
+	}
+	sort.Slice(resultEdges, func(i, j int) bool {
+		if resultEdges[i].From != resultEdges[j].From {
+			return resultEdges[i].From < resultEdges[j].From
+		}
+		return resultEdges[i].To < resultEdges[j].To
+	})
+	return changedPaths, resultEdges
 }
