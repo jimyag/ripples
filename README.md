@@ -141,6 +141,8 @@ dot -Tsvg impact.dot -o impact.svg
 
 生成 DOT 文本不依赖 Graphviz；只有转换成 SVG、PNG 等图片时才需要安装 `dot`。图中只包含本次变更涉及的 package，关系来自同一次声明级影响传播，而不是单独生成的 import 图。
 
+DOT 图的展示粒度固定为 package。ripples 内部仍通过函数、方法、字段、类型、变量和常量等声明关系计算影响范围，但不会把这些声明画成独立节点，也不输出完整的函数调用图。这可以保留 package 之间的传播路径，同时避免大型仓库的图因声明节点过多而难以阅读。
+
 ## 缓存
 
 ripples 使用 Git tree、分析格式版本、Go toolchain 和构建配置生成内容寻址缓存键。相同 tree 和构建配置的重复分析可以直接复用 package snapshot。
@@ -266,6 +268,7 @@ jobs:
 - 新增声明使用 new 依赖图，删除声明使用 old 依赖图。
 - `go.mod`、`go.work` 的有效构建配置变化会影响对应构建；dependency 版本或 replace 变化只影响实际传递依赖该 module 的本地 package。
 - `go.sum`、`go.work.sum` 新增或删除普通缓存记录不会产生影响；同一 module 版本的 checksum 改变会传播到实际使用者。
+- DOT 关系图只展示 package 节点，不展示函数、字段或其他声明节点。
 - 输出只表示 Go package 影响；binary、service、label 和部署单元由调用方映射。
 
 ## 开发
