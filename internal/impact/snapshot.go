@@ -49,6 +49,9 @@ type Symbol struct {
 }
 
 func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (PackageSnapshot, error) {
+	// ./... already makes every local package an initial package. Omitting
+	// NeedDeps keeps dependency function bodies as black boxes instead of
+	// retaining syntax and type information for the full transitive graph.
 	cfg := &gopackages.Config{
 		Context: ctx,
 		Dir:     source.Dir,
@@ -56,7 +59,6 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 			gopackages.NeedFiles |
 			gopackages.NeedCompiledGoFiles |
 			gopackages.NeedImports |
-			gopackages.NeedDeps |
 			gopackages.NeedModule |
 			gopackages.NeedEmbedFiles |
 			gopackages.NeedSyntax |
