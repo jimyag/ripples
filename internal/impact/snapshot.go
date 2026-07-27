@@ -271,7 +271,7 @@ func findModulePath(packages []*gopackages.Package) string {
 
 func moduleFilesHash(root string) string {
 	hash := sha256.New()
-	for _, name := range []string{"go.mod", "go.work"} {
+	for _, name := range []string{"go.mod", "go.sum", "go.work", "go.work.sum"} {
 		data, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil {
 			continue

@@ -12,7 +12,7 @@ import (
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-const analysisVersion = "symbol-impact-v12"
+const analysisVersion = "symbol-impact-v13"
 
 // Analyzer computes declaration-level impact between two Git revisions.
 type Analyzer struct {
@@ -39,7 +39,15 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 		return nil, err
 	}
 
-	changed := changedSymbols(oldSnapshot, newSnapshot)
+	moduleChanges := make(map[string]struct{})
+	if oldSnapshot.ModuleHash != newSnapshot.ModuleHash {
+		oldModules, newModules, err := a.loadModuleSnapshotPair(ctx, repoPath, oldRef, newRef)
+		if err != nil {
+			return nil, err
+		}
+		moduleChanges = changedModulePackages(oldModules, newModules)
+	}
+	changed := changedSymbols(oldSnapshot, newSnapshot, moduleChanges)
 	reverse := reverseDependencies(oldSnapshot, newSnapshot)
 	affectedSymbols := transitiveDependents(changed, reverse)
 
@@ -143,16 +151,7 @@ func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (*Pac
 }
 
 func (a *Analyzer) loadResolvedSnapshot(ctx context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
-	key := snapshot.Key(
-		analysisVersion,
-		revision.Tree,
-		runtime.Version(),
-		os.Getenv("GOOS"),
-		os.Getenv("GOARCH"),
-		os.Getenv("CGO_ENABLED"),
-		os.Getenv("GOFLAGS"),
-		os.Getenv("GOEXPERIMENT"),
-	)
+	key := analysisCacheKey("package-graph", revision)
 	var result PackageSnapshot
 	if a.cache != nil {
 		hit, err := a.cache.Load("package-snapshots", key, &result)
@@ -180,7 +179,50 @@ func (a *Analyzer) loadResolvedSnapshot(ctx context.Context, revision *snapshot.
 	return &result, nil
 }
 
-func changedSymbols(oldSnapshot, newSnapshot *PackageSnapshot) map[string]struct{} {
+func analysisCacheKey(kind string, revision *snapshot.Revision) string {
+	return snapshot.Key(
+		analysisVersion,
+		kind,
+		revision.Tree,
+		runtime.Version(),
+		os.Getenv("GOOS"),
+		os.Getenv("GOARCH"),
+		os.Getenv("CGO_ENABLED"),
+		os.Getenv("GOFLAGS"),
+		os.Getenv("GOEXPERIMENT"),
+	)
+}
+
+func (a *Analyzer) loadModuleSnapshotPair(
+	ctx context.Context,
+	repoPath, oldRef, newRef string,
+) (*moduleSnapshot, *moduleSnapshot, error) {
+	var oldSnapshot, newSnapshot *moduleSnapshot
+	if err := parallelFor(2, func(index int) error {
+		ref := oldRef
+		if index == 1 {
+			ref = newRef
+		}
+		loaded, err := a.loadModuleSnapshot(ctx, repoPath, ref)
+		if err != nil {
+			return err
+		}
+		if index == 0 {
+			oldSnapshot = loaded
+		} else {
+			newSnapshot = loaded
+		}
+		return nil
+	}); err != nil {
+		return nil, nil, fmt.Errorf("load module snapshots: %w", err)
+	}
+	return oldSnapshot, newSnapshot, nil
+}
+
+func changedSymbols(
+	oldSnapshot, newSnapshot *PackageSnapshot,
+	moduleChanges map[string]struct{},
+) map[string]struct{} {
 	changed := make(map[string]struct{})
 	all := make(map[string]struct{}, len(oldSnapshot.Symbols)+len(newSnapshot.Symbols))
 	for id := range oldSnapshot.Symbols {
@@ -190,16 +232,18 @@ func changedSymbols(oldSnapshot, newSnapshot *PackageSnapshot) map[string]struct
 		all[id] = struct{}{}
 	}
 
-	moduleChanged := oldSnapshot.ModuleHash != newSnapshot.ModuleHash
 	for id := range all {
 		if isDispatchSymbol(id) {
 			continue
 		}
 		oldSymbol, oldOK := oldSnapshot.Symbols[id]
 		newSymbol, newOK := newSnapshot.Symbols[id]
-		if moduleChanged || !oldOK || !newOK || oldSymbol.Hash != newSymbol.Hash {
+		if !oldOK || !newOK || oldSymbol.Hash != newSymbol.Hash {
 			changed[id] = struct{}{}
 		}
+	}
+	for packagePath := range moduleChanges {
+		changed[packageInitID(packagePath)] = struct{}{}
 	}
 	return changed
 }

@@ -155,7 +155,7 @@ RIPPLES_CACHE=/absolute/path/to/cache ripples \
 - `GOOS`、`GOARCH`、`CGO_ENABLED`
 - `GOFLAGS`、`GOEXPERIMENT`
 
-snapshot 包含当前构建中的 Go AST、类型解析结果、`go:embed` 文件映射、其他编译输入和声明依赖图。`go.mod`、`go.work` 的内容变化也会参与影响判断。
+snapshot 包含当前构建中的 Go AST、类型解析结果、CGo/编译指令、`go:embed` 文件映射、其他编译输入和声明依赖图。module/workspace 文件变化时，ripples 会额外缓存轻量的第三方 module 依赖图，只传播到实际使用相关 module 的本地 package。
 
 ## 在 GitHub Actions 中使用
 
@@ -244,11 +244,13 @@ jobs:
 
 - 默认不分析 `_test.go`。
 - 只分析当前 `GOOS`、`GOARCH` 和 build tags 对应的构建结果；需要覆盖多种构建配置时，应分别执行。
+- CGo preamble 和 `//go:` 编译指令会参与语义比较；声明级指令沿实际使用者传播，链接级指令按 package 保守传播。
 - 当前 module 内会追踪接口参数和字段、变量赋值、工厂及多返回值、闭包、泛型透传、类型断言和 type switch、方法值和方法表达式，以及 slice、map、channel、range 和 `append` 中可由 AST 与类型信息确定的具体实现。
 - 标准库和 `go.mod` 中的第三方依赖按黑盒处理，不遍历其函数体；本地具体值传入外部接口时，会按接口方法契约继续传播。
 - 反射、`unsafe`、`plugin`、运行时注册和只由外部配置决定的动态调用无法由 Go AST 完整确定，ripples 不猜测缺少静态证据的调用关系。
 - 新增声明使用 new 依赖图，删除声明使用 old 依赖图。
-- `go.mod` 或 `go.work` 发生变化时，按保守策略影响所有本地 package。
+- `go.mod`、`go.work` 的有效构建配置变化会影响对应构建；dependency 版本或 replace 变化只影响实际传递依赖该 module 的本地 package。
+- `go.sum`、`go.work.sum` 新增或删除普通缓存记录不会产生影响；同一 module 版本的 checksum 改变会传播到实际使用者。
 - 输出只表示 Go package 影响；binary、service、label 和部署单元由调用方映射。
 
 ## 开发

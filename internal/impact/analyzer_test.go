@@ -785,6 +785,253 @@ func Pay() string { return "value" }
 	}
 }
 
+func TestAnalyzePropagatesCompilerDirectiveChange(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "payment/payment.go", `package payment
+
+func Pay() string { return "value" }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/payment"
+
+func main() { _ = payment.Pay() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "payment/payment.go", `package payment
+
+//go:noinline
+func Pay() string { return "value" }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"payment.payment",
+	})
+}
+
+func TestAnalyzeDoesNotPropagateUnusedCompilerDirectiveChange(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "payment/payment.go", `package payment
+
+func Used() string { return "used" }
+func Unused() string { return "unused" }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/payment"
+
+func main() { _ = payment.Used() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "payment/payment.go", `package payment
+
+func Used() string { return "used" }
+
+//go:noinline
+func Unused() string { return "unused" }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"payment.payment"})
+}
+
+func TestAnalyzePropagatesCgoPreambleChange(t *testing.T) {
+	goEnv := exec.Command("go", "env", "CGO_ENABLED")
+	output, err := goEnv.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(output)) != "1" {
+		t.Skip("cgo is disabled")
+	}
+
+	repo := initModule(t)
+	writeModuleFile(t, repo, "bridge/bridge.go", `package bridge
+
+/*
+static int value() { return 1; }
+*/
+import "C"
+
+func Value() int { return int(C.value()) }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/bridge"
+
+func main() { _ = bridge.Value() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "bridge/bridge.go", `package bridge
+
+/*
+static int value() { return 2; }
+*/
+import "C"
+
+func Value() int { return int(C.value()) }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"bridge.bridge",
+		"cmd/server.main",
+	})
+}
+
+func TestAnalyzeIgnoresNonSemanticGoModChange(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "payment/payment.go", `package payment
+
+func Pay() string { return "value" }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "go.mod", `module example.com/app
+
+// This comment does not affect the build.
+go 1.25
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{})
+}
+
+func TestAnalyzePropagatesUsedModuleReplacementChange(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "dependency-one/go.mod", "module example.com/dependency\n\ngo 1.25\n")
+	writeModuleFile(t, repo, "dependency-one/dependency.go", `package dependency
+
+func Value() string { return "one" }
+`)
+	writeModuleFile(t, repo, "dependency-two/go.mod", "module example.com/dependency\n\ngo 1.25\n")
+	writeModuleFile(t, repo, "dependency-two/dependency.go", `package dependency
+
+func Value() string { return "two" }
+`)
+	writeModuleFile(t, repo, "go.mod", `module example.com/app
+
+go 1.25
+
+require example.com/dependency v0.0.0
+
+replace example.com/dependency => ./dependency-one
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "example.com/dependency"
+
+func Value() string { return dependency.Value() }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/service"
+
+func main() { _ = service.Value() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "go.mod", `module example.com/app
+
+go 1.25
+
+require example.com/dependency v0.0.0
+
+replace example.com/dependency => ./dependency-two
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"service.service",
+	})
+}
+
+func TestAnalyzeIgnoresUnusedModuleReplacementChange(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "dependency-one/go.mod", "module example.com/dependency\n\ngo 1.25\n")
+	writeModuleFile(t, repo, "dependency-one/dependency.go", "package dependency\n")
+	writeModuleFile(t, repo, "dependency-two/go.mod", "module example.com/dependency\n\ngo 1.25\n")
+	writeModuleFile(t, repo, "dependency-two/dependency.go", "package dependency\n")
+	writeModuleFile(t, repo, "go.mod", `module example.com/app
+
+go 1.25
+
+require example.com/dependency v0.0.0
+
+replace example.com/dependency => ./dependency-one
+`)
+	writeModuleFile(t, repo, "service/service.go", "package service\n")
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "go.mod", `module example.com/app
+
+go 1.25
+
+require example.com/dependency v0.0.0
+
+replace example.com/dependency => ./dependency-two
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{})
+}
+
+func TestAnalyzePropagatesGoWorkBuildConfigurationChange(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.24\n")
+	writeModuleFile(t, repo, "go.work", "go 1.24\n\nuse .\n")
+	writeModuleFile(t, repo, "service/service.go", "package service\n")
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import _ "example.com/app/service"
+
+func main() {}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "go.work", "go 1.25\n\nuse .\n")
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"service.service",
+	})
+}
+
 func TestLoadSnapshotUsesPersistentCache(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "payment/payment.go", "package payment\n")

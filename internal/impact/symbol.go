@@ -51,6 +51,9 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 				return fmt.Errorf("hash declaration %s: %w", declaration.id, err)
 			}
 		}
+		if declaration.buildMetadataHash != "" {
+			hash = stableMarkerHash(hash + "\x00" + declaration.buildMetadataHash)
+		}
 
 		dependencies := make(map[string]struct{})
 		if declaration.node != nil {
@@ -1460,11 +1463,12 @@ func concreteInterfaceMethods(
 }
 
 type symbolDeclaration struct {
-	id       string
-	node     ast.Node
-	hashNode ast.Node
-	hash     string
-	pkg      *gopackages.Package
+	id                string
+	node              ast.Node
+	hashNode          ast.Node
+	hash              string
+	buildMetadataHash string
+	pkg               *gopackages.Package
 }
 
 func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[types.Object]string) []symbolDeclaration {
@@ -1486,12 +1490,19 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 				} else if object := pkg.TypesInfo.Defs[declaration.Name]; object != nil {
 					objectIDs[object] = id
 				}
-				declarations = append(declarations, symbolDeclaration{id: id, node: declaration, hashNode: declaration, pkg: pkg})
+				declarations = append(declarations, symbolDeclaration{
+					id:                id,
+					node:              declaration,
+					hashNode:          declaration,
+					buildMetadataHash: declarationBuildMetadataHash(declaration.Doc),
+					pkg:               pkg,
+				})
 			case *ast.GenDecl:
 				for _, spec := range declaration.Specs {
 					switch typedSpec := spec.(type) {
 					case *ast.TypeSpec:
 						id := packageObjectID(pkg.PkgPath, "type", typedSpec.Name.Name)
+						buildMetadataHash := declarationBuildMetadataHash(declaration.Doc, typedSpec.Doc, typedSpec.Comment)
 						if object := pkg.TypesInfo.Defs[typedSpec.Name]; object != nil {
 							objectIDs[object] = id
 						}
@@ -1501,16 +1512,24 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 								typeParameters = typedSpec.TypeParams
 							}
 							declarations = append(declarations, symbolDeclaration{
-								id:   id,
-								node: typeParameters,
-								hash: typeShellHash(typedSpec, kind, pkg),
-								pkg:  pkg,
+								id:                id,
+								node:              typeParameters,
+								hash:              typeShellHash(typedSpec, kind, pkg),
+								buildMetadataHash: buildMetadataHash,
+								pkg:               pkg,
 							})
 							declarations = append(declarations, memberDeclarations(pkg, typedSpec.Name.Name, kind, fields, objectIDs)...)
 						} else {
-							declarations = append(declarations, symbolDeclaration{id: id, node: typedSpec, hashNode: typedSpec, pkg: pkg})
+							declarations = append(declarations, symbolDeclaration{
+								id:                id,
+								node:              typedSpec,
+								hashNode:          typedSpec,
+								buildMetadataHash: buildMetadataHash,
+								pkg:               pkg,
+							})
 						}
 					case *ast.ValueSpec:
+						buildMetadataHash := declarationBuildMetadataHash(declaration.Doc, typedSpec.Doc, typedSpec.Comment)
 						for _, name := range typedSpec.Names {
 							object := pkg.TypesInfo.Defs[name]
 							if object == nil || name.Name == "_" {
@@ -1518,7 +1537,13 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 							}
 							id := packageObjectID(pkg.PkgPath, objectKind(object), name.Name)
 							objectIDs[object] = id
-							symbol := symbolDeclaration{id: id, node: typedSpec, hashNode: typedSpec, pkg: pkg}
+							symbol := symbolDeclaration{
+								id:                id,
+								node:              typedSpec,
+								hashNode:          typedSpec,
+								buildMetadataHash: buildMetadataHash,
+								pkg:               pkg,
+							}
 							if constant, ok := object.(*types.Const); ok {
 								symbol.hash = constantHash(constant)
 							}
@@ -1691,10 +1716,14 @@ func addInitializationDependencies(loaded []*gopackages.Package, packages map[st
 			}
 		}
 		id := packageInitID(pkg.PkgPath)
+		hashValue := "package-init"
+		if buildMetadataHash := packageBuildMetadataHash(pkg); buildMetadataHash != "" {
+			hashValue += "\x00" + buildMetadataHash
+		}
 		symbols[id] = Symbol{
 			ID:           id,
 			PackagePath:  pkg.PkgPath,
-			Hash:         stableMarkerHash("package-init"),
+			Hash:         stableMarkerHash(hashValue),
 			Dependencies: sortedSet(dependencies),
 		}
 	}
