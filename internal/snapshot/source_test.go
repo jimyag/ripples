@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -75,6 +76,80 @@ replace example.com/libs => ../../libs
 	}
 	if got := gitCommand(t, repo, "worktree", "list", "--porcelain"); strings.Contains(got, worktreeDir) {
 		t.Fatalf("worktree still registered after Close():\n%s", got)
+	}
+}
+
+func TestOpenRevisionSupportsConcurrentWorktrees(t *testing.T) {
+	repo := initRepository(t)
+	writeFile(t, filepath.Join(repo, "value.txt"), "old")
+	oldCommit := commitAll(t, repo, "old")
+	writeFile(t, filepath.Join(repo, "value.txt"), "new")
+	newCommit := commitAll(t, repo, "new")
+
+	revisions := make([]*Revision, 2)
+	for index, commit := range []string{oldCommit, newCommit} {
+		revision, err := Resolve(context.Background(), repo, commit)
+		if err != nil {
+			t.Fatalf("Resolve(%s) error = %v", commit, err)
+		}
+		revisions[index] = revision
+	}
+
+	sources := make([]*Source, len(revisions))
+	errors := make([]error, len(revisions))
+	var wait sync.WaitGroup
+	for index := range revisions {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			sources[index], errors[index] = OpenRevision(context.Background(), revisions[index])
+		}()
+	}
+	wait.Wait()
+	for index, err := range errors {
+		if err != nil {
+			t.Fatalf("OpenRevision(%d) error = %v", index, err)
+		}
+	}
+	assertFileContent(t, filepath.Join(sources[0].Dir, "value.txt"), "old")
+	assertFileContent(t, filepath.Join(sources[1].Dir, "value.txt"), "new")
+
+	for index := range sources {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errors[index] = sources[index].Close()
+		}()
+	}
+	wait.Wait()
+	for index, err := range errors {
+		if err != nil {
+			t.Fatalf("Close(%d) error = %v", index, err)
+		}
+	}
+
+	worktrees := gitCommand(t, repo, "worktree", "list", "--porcelain")
+	if strings.Count(worktrees, "\nworktree ") != 0 {
+		t.Fatalf("temporary worktrees remain registered:\n%s", worktrees)
+	}
+}
+
+func TestOpenRevisionCleansUpWhenSubdirectoryIsMissing(t *testing.T) {
+	repo := initRepository(t)
+	writeFile(t, filepath.Join(repo, "value.txt"), "value")
+	commit := commitAll(t, repo, "initial")
+	revision, err := Resolve(context.Background(), repo, commit)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	revision.Subdir = filepath.Join("missing", "module")
+
+	if _, err := OpenRevision(context.Background(), revision); err == nil {
+		t.Fatal("OpenRevision() error = nil, want missing subdirectory error")
+	}
+	worktrees := gitCommand(t, repo, "worktree", "list", "--porcelain")
+	if strings.Count(worktrees, "\nworktree ") != 0 {
+		t.Fatalf("failed snapshot left a worktree registered:\n%s", worktrees)
 	}
 }
 
