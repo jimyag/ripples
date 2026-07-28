@@ -80,14 +80,20 @@ replace example.com/libs => ../../libs
 }
 
 func TestOpenRevisionSupportsConcurrentWorktrees(t *testing.T) {
+	const worktreeCount = 16
+
 	repo := initRepository(t)
 	writeFile(t, filepath.Join(repo, "value.txt"), "old")
 	oldCommit := commitAll(t, repo, "old")
 	writeFile(t, filepath.Join(repo, "value.txt"), "new")
 	newCommit := commitAll(t, repo, "new")
 
-	revisions := make([]*Revision, 2)
-	for index, commit := range []string{oldCommit, newCommit} {
+	revisions := make([]*Revision, worktreeCount)
+	for index := range revisions {
+		commit := oldCommit
+		if index%2 == 1 {
+			commit = newCommit
+		}
 		revision, err := Resolve(context.Background(), repo, commit)
 		if err != nil {
 			t.Fatalf("Resolve(%s) error = %v", commit, err)
@@ -111,8 +117,13 @@ func TestOpenRevisionSupportsConcurrentWorktrees(t *testing.T) {
 			t.Fatalf("OpenRevision(%d) error = %v", index, err)
 		}
 	}
-	assertFileContent(t, filepath.Join(sources[0].Dir, "value.txt"), "old")
-	assertFileContent(t, filepath.Join(sources[1].Dir, "value.txt"), "new")
+	for index, source := range sources {
+		want := "old"
+		if index%2 == 1 {
+			want = "new"
+		}
+		assertFileContent(t, filepath.Join(source.Dir, "value.txt"), want)
+	}
 
 	for index := range sources {
 		wait.Add(1)

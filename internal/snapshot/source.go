@@ -10,6 +10,8 @@ import (
 	"sync"
 )
 
+var repositoryWorktreeLocks sync.Map
+
 // Source is an immutable checkout of a Git commit in a temporary detached
 // worktree. Dir points to the same repository-relative directory passed to
 // Resolve. Close removes the worktree.
@@ -94,7 +96,10 @@ func OpenRevision(ctx context.Context, revision *Revision) (*Source, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create worktree parent: %w", err)
 	}
-	worktreeDir := filepath.Join(tempDir, "checkout")
+	// Git derives its administrative worktree name from the checkout
+	// directory basename. Keep that basename unique so concurrent snapshots
+	// cannot race on .git/worktrees/<name>.
+	worktreeDir := filepath.Join(tempDir, filepath.Base(tempDir))
 
 	source := &Source{
 		RepoPath:    revision.RepoPath,
@@ -106,7 +111,11 @@ func OpenRevision(ctx context.Context, revision *Revision) (*Source, error) {
 		tempDir:     tempDir,
 		worktreeDir: worktreeDir,
 	}
-	if _, err := gitOutput(ctx, revision.GitRoot, "worktree", "add", "--detach", worktreeDir, revision.Commit); err != nil {
+	lock := repositoryWorktreeLock(revision.GitRoot)
+	lock.Lock()
+	_, err = gitOutput(ctx, revision.GitRoot, "worktree", "add", "--detach", worktreeDir, revision.Commit)
+	lock.Unlock()
+	if err != nil {
 		_ = os.RemoveAll(tempDir)
 		return nil, fmt.Errorf("create detached worktree: %w", err)
 	}
@@ -127,7 +136,11 @@ func (s *Source) Close() error {
 	}
 	s.closeOnce.Do(func() {
 		if s.worktreeDir != "" {
-			if _, err := gitOutput(context.Background(), s.GitRoot, "worktree", "remove", "--force", s.worktreeDir); err != nil {
+			lock := repositoryWorktreeLock(s.GitRoot)
+			lock.Lock()
+			_, err := gitOutput(context.Background(), s.GitRoot, "worktree", "remove", "--force", s.worktreeDir)
+			lock.Unlock()
+			if err != nil {
 				s.closeErr = err
 			}
 		}
@@ -136,6 +149,11 @@ func (s *Source) Close() error {
 		}
 	})
 	return s.closeErr
+}
+
+func repositoryWorktreeLock(gitRoot string) *sync.Mutex {
+	lock, _ := repositoryWorktreeLocks.LoadOrStore(gitRoot, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 func gitOutput(ctx context.Context, repoPath string, args ...string) (string, error) {
