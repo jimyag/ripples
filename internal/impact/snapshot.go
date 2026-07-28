@@ -178,32 +178,8 @@ func summarizePackage(root, modulePath string, pkg *gopackages.Package) (Package
 func astFileHash(file *ast.File, fset *token.FileSet) (string, error) {
 	// packages.Load parses without SkipObjectResolution. These deprecated
 	// parser-only links are not used by go/types, but the legacy hash included
-	// their nil fields after reparsing with SkipObjectResolution. Normalize the
-	// loaded tree temporarily to preserve that hash format without parsing the
-	// file again, then restore it for declaration hashing.
-	scope := file.Scope
-	unresolved := file.Unresolved
-	var restoreObjects []func()
-	file.Scope = nil
-	file.Unresolved = nil
-	ast.Inspect(file, func(node ast.Node) bool {
-		if identifier, ok := node.(*ast.Ident); ok && identifier.Obj != nil {
-			object := identifier.Obj
-			restoreObjects = append(restoreObjects, func() {
-				identifier.Obj = object
-			})
-			identifier.Obj = nil
-		}
-		return true
-	})
-	defer func() {
-		file.Scope = scope
-		file.Unresolved = unresolved
-		for _, restore := range restoreObjects {
-			restore()
-		}
-	}()
-
+	// their nil fields after reparsing with SkipObjectResolution. Exclude those
+	// fields while printing so concurrent declaration hashing stays read-only.
 	hash := sha256.New()
 	if err := ast.Fprint(hash, fset, file, astFieldFilter); err != nil {
 		return "", err
@@ -212,32 +188,14 @@ func astFileHash(file *ast.File, fset *token.FileSet) (string, error) {
 }
 
 func astFieldFilter(name string, value reflect.Value) bool {
-	if name == "Doc" || name == "Comment" || name == "Comments" {
+	if name == "Doc" || name == "Comment" || name == "Comments" ||
+		name == "Obj" || name == "Scope" || name == "Unresolved" {
 		return false
 	}
 	return value.Type() != reflect.TypeFor[token.Pos]()
 }
 
 func astHash(node ast.Node, fset *token.FileSet) (string, error) {
-	var restoreObjects []func()
-	ast.Inspect(node, func(current ast.Node) bool {
-		identifier, ok := current.(*ast.Ident)
-		if !ok || identifier.Obj == nil {
-			return true
-		}
-		object := identifier.Obj
-		restoreObjects = append(restoreObjects, func() {
-			identifier.Obj = object
-		})
-		identifier.Obj = nil
-		return true
-	})
-	defer func() {
-		for _, restore := range restoreObjects {
-			restore()
-		}
-	}()
-
 	hash := sha256.New()
 	if err := ast.Fprint(hash, fset, node, astFieldFilter); err != nil {
 		return "", err

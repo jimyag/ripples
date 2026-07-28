@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	gopackages "golang.org/x/tools/go/packages"
@@ -80,4 +81,48 @@ func parserObjectCount(file *ast.File) int {
 		return true
 	})
 	return count
+}
+
+func TestASTHashIsDeterministicWhenCalledConcurrently(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "example.go", `package example
+
+type Config struct {
+	First, Second int
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := file.Decls[0].(*ast.GenDecl).Specs[0].(*ast.TypeSpec).Type.(*ast.StructType).Fields.List[0]
+	want, err := astHash(field, fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 100
+	results := make(chan string, workers)
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			got, hashErr := astHash(field, fset)
+			if hashErr != nil {
+				results <- hashErr.Error()
+				return
+			}
+			results <- got
+		}()
+	}
+	group.Wait()
+	close(results)
+	for got := range results {
+		if got != want {
+			t.Fatalf("concurrent astHash() = %q, want %q", got, want)
+		}
+	}
+	if got := parserObjectCount(file); got == 0 {
+		t.Fatal("concurrent astHash() mutated parser object links")
+	}
 }
