@@ -1,11 +1,26 @@
-# ripples
+<h1 align="center">ripples</h1>
 
-[![Check](https://github.com/jimyag/ripples/actions/workflows/check.yaml/badge.svg)](https://github.com/jimyag/ripples/actions/workflows/check.yaml)
-[![Release](https://github.com/jimyag/ripples/actions/workflows/release.yaml/badge.svg)](https://github.com/jimyag/ripples/actions/workflows/release.yaml)
+<p align="center">
+  <strong>Find the Go packages affected by a Git change.</strong>
+</p>
 
-基于 Go AST、类型信息和声明依赖图，分析两个 Git revision 之间受直接或间接影响的 Go package。
+<p align="center">
+  <a href="https://github.com/jimyag/ripples/actions/workflows/check.yaml"><img src="https://github.com/jimyag/ripples/actions/workflows/check.yaml/badge.svg" alt="Check"></a>
+  <a href="https://github.com/jimyag/ripples/actions/workflows/release.yaml"><img src="https://github.com/jimyag/ripples/actions/workflows/release.yaml/badge.svg" alt="Release"></a>
+</p>
 
-ripples 的稳定输出是 package，而不是 binary 或 service。调用方可以继续把 `cmd/server.main` 映射为构建任务、服务名或部署单元。
+<p align="center">
+  <a href="#安装">安装</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#支持范围">支持范围</a> ·
+  <a href="#在-github-actions-中使用">GitHub Actions</a>
+</p>
+
+---
+
+ripples 基于 Go AST、类型信息和声明依赖图，分析两个 Git revision 之间受直接或间接影响的 Go package。它关注代码是否实际引用了变更声明，而不是简单返回所有 import 变更 package 的调用方。
+
+ripples 的稳定输出是 package。binary、service、构建任务和部署单元可以在 CI 中继续映射：
 
 ```text
 cmd/server.main
@@ -13,53 +28,68 @@ internal/order.order
 payment.payment
 ```
 
-## 工作方式
+## 核心能力
 
-给定同一仓库中的 old/new revision，ripples 会：
-
-1. 解析 revision 对应的 commit 和 Git tree，不修改当前工作区。
-2. 为两棵 tree 创建临时 detached worktree，保留 Git 仓库中的完整相对目录结构。
-3. 按当前 Go 构建配置加载本地 package 的 AST 和类型信息。
-4. 忽略注释和源码位置，比较函数、方法、类型、变量、常量和嵌入文件等声明的语义内容。
-5. 合并 old/new 声明依赖图，从变更声明反向查找直接及间接使用者。
-6. 稳定排序并输出 `<module 内相对路径>.<package 名>`。
-
-变更所在的 package 始终返回。其他 package 只有在声明实际引用或调用了变更内容时才会传播；仅仅 import 同一个 package 不会被判定为受影响。
+- **声明级影响分析**：识别新增、删除和修改的函数、方法、类型、字段、变量、常量和 `init`。
+- **直接与间接传播**：沿实际声明引用和调用关系反向查找所有受影响 package。
+- **接口实现解析**：根据调用点和值流定位实际接口实现，不把使用同一接口的其他实现混在一起。
+- **函数值和值流**：覆盖参数、返回值、闭包、方法值、struct 字段、容器、多返回值、类型断言和泛型透传。
+- **构建输入感知**：识别 build tags、CGo、`//go:` 指令、`go:embed`、`go.mod` 和 `go.work` 的有效变化。
+- **适合 CI**：输出稳定排序的 package 列表，支持持久缓存、JSON、摘要和 DOT 关系图。
 
 ## 安装
 
-可以直接下载最新的 [GitHub Release](https://github.com/jimyag/ripples/releases/latest) 二进制，或者使用 `go install`。
+选择下面任意一种方式。安装后运行 `ripples --version` 确认命令可用。
 
-### 下载二进制
+### 使用 Go 安装
 
-| 系统 | 架构 | Release asset |
-| --- | --- | --- |
-| Linux | amd64 | `ripples_linux_amd64` |
-| Linux | arm64 | `ripples_linux_arm64` |
-| macOS | amd64 | `ripples_darwin_amd64` |
-| macOS | arm64 | `ripples_darwin_arm64` |
-| Windows | amd64 | `ripples_windows_amd64.exe` |
-| Windows | arm64 | `ripples_windows_arm64.exe` |
-
-例如，在 macOS arm64 上使用 GitHub CLI 安装：
-
-```bash
-gh release download \
-  --repo jimyag/ripples \
-  --pattern ripples_darwin_arm64 \
-  --dir /tmp/ripples-release
-install -m 0755 /tmp/ripples-release/ripples_darwin_arm64 /usr/local/bin/ripples
-```
-
-省略 tag 时，`gh release download` 会下载最新 Release。
-
-### 使用 go install
+如果本机已有 Go toolchain，这是最简单的安装方式：
 
 ```bash
 go install github.com/jimyag/ripples@latest
+ripples --version
 ```
 
-安装结果位于 `$(go env GOPATH)/bin/ripples`。
+二进制会安装到 `$(go env GOPATH)/bin`。如果 shell 找不到 `ripples`，请把该目录加入 `PATH`。
+
+### 下载最新二进制
+
+[GitHub Release](https://github.com/jimyag/ripples/releases/latest) 提供 Linux、macOS 和 Windows 的 amd64/arm64 原始二进制，不需要本地 Go 环境。
+
+macOS 和 Linux 可以使用下面的命令自动选择当前平台：
+
+```bash
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) asset="ripples_darwin_arm64" ;;
+  Darwin-x86_64) asset="ripples_darwin_amd64" ;;
+  Linux-aarch64 | Linux-arm64) asset="ripples_linux_arm64" ;;
+  Linux-x86_64) asset="ripples_linux_amd64" ;;
+  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+
+download_dir="$(mktemp -d)"
+trap 'rm -rf "$download_dir"' EXIT
+gh release download \
+  --repo jimyag/ripples \
+  --pattern "$asset" \
+  --dir "$download_dir"
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "$download_dir/$asset" "$HOME/.local/bin/ripples"
+
+"$HOME/.local/bin/ripples" --version
+```
+
+该示例需要 [GitHub CLI](https://cli.github.com/)，并始终下载最新 Release。确保 `$HOME/.local/bin` 已加入 `PATH`。
+
+也可以按平台手动下载：
+
+| 系统 | amd64 | arm64 |
+| --- | --- | --- |
+| Linux | `ripples_linux_amd64` | `ripples_linux_arm64` |
+| macOS | `ripples_darwin_amd64` | `ripples_darwin_arm64` |
+| Windows | `ripples_windows_amd64.exe` | `ripples_windows_arm64.exe` |
+
+### 运行要求
 
 运行时还需要：
 
@@ -67,34 +97,36 @@ go install github.com/jimyag/ripples@latest
 - Go toolchain，用于按照目标仓库的 `go.mod`、构建约束和当前环境加载 package。
 - `-repo` 指定的 Go module 目录可以执行 `go list ./...`。
 
-## 快速使用
+即使通过 Release 安装了预编译二进制，分析目标 Go 项目时仍需要匹配该项目的 Go toolchain。
+
+## 快速开始
+
+分析最近一次提交：
 
 ```bash
-ripples \
-  -repo /path/to/repository \
-  -old <base-commit-or-ref> \
-  -new <head-commit-or-ref>
+ripples -repo . -old HEAD~1 -new HEAD
 ```
 
-例如分析最近一次提交：
+输出示例：
+
+```text
+internal/order.order
+cmd/server.main
+```
+
+增加 `-verbose` 可以在 stderr 查看 package 数量和分析耗时：
 
 ```bash
 ripples -repo . -old HEAD~1 -new HEAD -verbose
 ```
 
-`-repo` 应指向待分析的 Go module，可以是 Git 仓库根目录，也可以是 monorepo 中的子目录。ripples 会自动找到 Git 根目录，临时 worktree 会保留同仓库 `replace` 所需的相对路径。例如：
+`-repo` 应指向待分析的 Go module，可以是 Git 仓库根目录，也可以是 monorepo 中的 module 子目录。ripples 会自动找到 Git 根目录，并保留同仓库 `replace` 所需的相对路径：
 
 ```bash
 ripples \
   -repo /path/to/monorepo/services/api \
   -old HEAD~1 \
   -new HEAD
-```
-
-查看当前版本和构建信息：
-
-```bash
-ripples --version
 ```
 
 `-old` 和 `-new` 必须能够解析为 commit。ripples 分析的是已提交的 Git tree，不包含工作区中未提交的修改。
@@ -109,7 +141,20 @@ ripples --version
 | `-output` | `simple`、`json`、`text`、`summary` 或 `dot` | `simple` |
 | `-verbose` | 在 stderr 输出受影响 package 数量和耗时 | `false` |
 
-### 输出格式
+## 工作方式
+
+给定同一仓库中的 old/new revision，ripples 会：
+
+1. 解析 revision 对应的 commit 和 Git tree，不修改当前工作区。
+2. 为两棵 tree 创建临时 detached worktree，保留 Git 仓库中的完整相对目录结构。
+3. 按当前 Go 构建配置加载本地 package 的 AST 和类型信息。
+4. 忽略注释和源码位置，比较函数、方法、类型、变量、常量和嵌入文件等声明的语义内容。
+5. 合并 old/new 声明依赖图，从变更声明反向查找直接及间接使用者。
+6. 稳定排序并输出 `<module 内相对路径>.<package 名>`。
+
+变更所在的 package 始终返回。其他 package 只有在声明实际引用或调用了变更内容时才会传播；仅仅 import 同一个 package 不会被判定为受影响。
+
+## 输出格式
 
 默认的 `simple` 格式每行输出一个 package，适合 shell 和 CI：
 
@@ -267,7 +312,23 @@ jobs:
 
 `fetch-depth: 0` 用于确保 runner 上存在 base commit。CI 会使用最新 Release，并校验其中的 `checksums.txt`；`RIPPLES_CACHE` 必须配置为绝对路径。
 
-## 分析边界
+## 支持范围
+
+| 类别 | 支持的变化和使用方式 |
+| --- | --- |
+| 声明变化 | 函数、方法、类型、interface 方法、struct 字段、package 变量、常量和 `init` |
+| 变更类型 | 新增、删除和修改；删除使用 old 依赖图，新增使用 new 依赖图 |
+| 依赖传播 | 直接引用、间接引用、函数调用、方法调用和跨 package 传递 |
+| 接口调用 | 接口参数、返回值、字段、类型断言、type switch，以及调用点可确定的具体实现 |
+| 函数值 | 参数、返回值、多返回值、闭包捕获、函数类型转换、方法值、方法表达式和指针间接赋值 |
+| 构造与容器 | struct 构造器字段、slice、array、map、channel、range、`append`、容器返回值和静态可确定的索引/key |
+| 调用语法 | 普通调用、`go`、`defer`、variadic 调用、泛型函数和泛型透传 |
+| 初始化 | package 变量初始化、多个变量声明、常量变化、`init` 新增/删除/修改和跨 package 初始化顺序 |
+| 构建输入 | build tags、文件名构建约束、CGo preamble、`//go:` 指令、`go:embed` 和其他编译输入 |
+| Module/Workspace | `go.mod`、`go.sum`、`go.work`、`go.work.sum`、dependency 版本和 `replace` 的有效变化 |
+| 输出与复用 | simple、JSON、text、summary、DOT，以及按 Git tree 和构建配置复用的持久缓存 |
+
+### 明确边界
 
 - 默认不分析 `_test.go`。
 - 只分析当前 `GOOS`、`GOARCH` 和 build tags 对应的构建结果；需要覆盖多种构建配置时，应分别执行。
