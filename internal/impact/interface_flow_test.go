@@ -630,6 +630,156 @@ func main() {
 			want: []string{"cmd/server.main", "service.service"},
 		},
 		{
+			name: "closure captures function parameter",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+
+func Wrap(factory func() runner.Service) func() runner.Service {
+	return func() runner.Service {
+		return factory()
+	}
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.Wrap(factory.New)().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "constructor stores function field",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"holder/holder.go": `package holder
+
+import "example.com/app/runner"
+
+type Holder struct {
+	Factory func() runner.Service
+}
+
+func New(factory func() runner.Service) Holder {
+	return Holder{Factory: factory}
+}
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/holder"
+)
+
+func main() {
+	holder.New(factory.New).Factory().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function returned inside slice",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+
+func All() []func() runner.Service {
+	return []func() runner.Service{New}
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.All()[0]().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function returned inside map",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+
+func All() map[string]func() runner.Service {
+	return map[string]func() runner.Service{"primary": New}
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.All()["primary"]().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function returned through channel",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+
+func All() <-chan func() runner.Service {
+	result := make(chan func() runner.Service, 1)
+	result <- New
+	return result
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	(<-factory.All())().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
 			name: "type switch interface case",
 			files: map[string]string{
 				"cmd/server/main.go": `package main

@@ -143,6 +143,7 @@ type functionTarget struct {
 	pkg      *gopackages.Package
 	literal  *ast.FuncLit
 	function *types.Func
+	captured functionBindings
 }
 
 type functionBindings map[types.Object][]functionTarget
@@ -239,22 +240,37 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 }
 
 func containsFunctionValue(typ types.Type) bool {
+	return containsFunctionValueSeen(typ, make(map[types.Type]struct{}))
+}
+
+func containsFunctionValueSeen(typ types.Type, seen map[types.Type]struct{}) bool {
 	if typ == nil {
 		return false
 	}
+	if _, ok := seen[typ]; ok {
+		return false
+	}
+	seen[typ] = struct{}{}
 	switch underlying := typ.Underlying().(type) {
 	case *types.Signature:
 		return true
 	case *types.Slice:
-		return containsFunctionValue(underlying.Elem())
+		return containsFunctionValueSeen(underlying.Elem(), seen)
 	case *types.Array:
-		return containsFunctionValue(underlying.Elem())
+		return containsFunctionValueSeen(underlying.Elem(), seen)
 	case *types.Map:
-		return containsFunctionValue(underlying.Elem())
+		return containsFunctionValueSeen(underlying.Elem(), seen)
 	case *types.Chan:
-		return containsFunctionValue(underlying.Elem())
+		return containsFunctionValueSeen(underlying.Elem(), seen)
 	case *types.Pointer:
-		return containsFunctionValue(underlying.Elem())
+		return containsFunctionValueSeen(underlying.Elem(), seen)
+	case *types.Struct:
+		for index := range underlying.NumFields() {
+			if containsFunctionValueSeen(underlying.Field(index).Type(), seen) {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}
@@ -268,12 +284,36 @@ func (resolver *valueFlowResolver) functionTargets(
 ) []functionTarget {
 	switch typedExpression := expression.(type) {
 	case *ast.FuncLit:
-		return []functionTarget{{pkg: pkg, literal: typedExpression}}
+		return []functionTarget{{
+			pkg:      pkg,
+			literal:  typedExpression,
+			captured: cloneFunctionBindings(bindings),
+		}}
 	case *ast.ParenExpr:
 		return resolver.functionTargets(pkg, typedExpression.X, bindings, resultIndex)
 	case *ast.UnaryExpr:
 		if typedExpression.Op == token.AND {
 			return resolver.functionTargets(pkg, typedExpression.X, bindings, resultIndex)
+		}
+		if typedExpression.Op == token.ARROW {
+			return resolver.functionTargets(pkg, typedExpression.X, bindings, resultIndex)
+		}
+	case *ast.IndexExpr:
+		if isFunctionContainer(pkg.TypesInfo.TypeOf(typedExpression.X)) {
+			return resolver.functionTargets(pkg, typedExpression.X, bindings, resultIndex)
+		}
+	case *ast.SelectorExpr:
+		selection := pkg.TypesInfo.Selections[typedExpression]
+		field, _ := selectionObject(selection).(*types.Var)
+		if field != nil && field.IsField() && containsFunctionValue(field.Type()) {
+			if targets, resolved := resolver.functionFieldTargets(
+				pkg,
+				typedExpression.X,
+				field,
+				bindings,
+			); resolved {
+				return targets
+			}
 		}
 	case *ast.CompositeLit:
 		var result []functionTarget
@@ -319,6 +359,128 @@ func (resolver *valueFlowResolver) functionTargets(
 	return resolver.functionTargetsForObject(object, bindings, resultIndex)
 }
 
+func isFunctionContainer(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	switch typ.Underlying().(type) {
+	case *types.Slice, *types.Array, *types.Map, *types.Chan:
+		return containsFunctionValue(typ)
+	default:
+		return false
+	}
+}
+
+func (resolver *valueFlowResolver) functionFieldTargets(
+	pkg *gopackages.Package,
+	receiver ast.Expr,
+	field *types.Var,
+	bindings functionBindings,
+) ([]functionTarget, bool) {
+	switch typedReceiver := receiver.(type) {
+	case *ast.ParenExpr:
+		return resolver.functionFieldTargets(pkg, typedReceiver.X, field, bindings)
+	case *ast.StarExpr:
+		return resolver.functionFieldTargets(pkg, typedReceiver.X, field, bindings)
+	case *ast.CompositeLit:
+		structType, _ := namedStruct(pkg.TypesInfo.TypeOf(typedReceiver))
+		if structType == nil {
+			return nil, false
+		}
+		for index, element := range typedReceiver.Elts {
+			fieldIndex := index
+			value := ast.Expr(element)
+			if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
+				value = keyValue.Value
+				key, _ := keyValue.Key.(*ast.Ident)
+				keyField, _ := pkg.TypesInfo.Uses[key].(*types.Var)
+				fieldIndex = structFieldIndex(structType, keyField)
+			}
+			if fieldIndex >= 0 && fieldIndex < structType.NumFields() && structType.Field(fieldIndex) == field {
+				return resolver.functionTargets(pkg, value, bindings, 0), true
+			}
+		}
+		return nil, true
+	case *ast.CallExpr:
+		var result []functionTarget
+		resolved := false
+		for _, target := range resolver.functionTargets(pkg, typedReceiver.Fun, bindings, 0) {
+			targets, targetResolved := resolver.functionReturnFieldTargets(
+				pkg,
+				typedReceiver,
+				target,
+				bindings,
+				field,
+			)
+			resolved = resolved || targetResolved
+			result = appendUniqueFunctionTargets(result, targets)
+		}
+		return result, resolved
+	}
+
+	object := assignedObject(pkg.TypesInfo, receiver)
+	if object == nil {
+		return nil, false
+	}
+	declarations := resolver.functionValues[object]
+	if len(declarations) == 0 {
+		return nil, false
+	}
+	var result []functionTarget
+	resolved := false
+	for _, declaration := range declarations {
+		targets, declarationResolved := resolver.functionFieldTargets(
+			declaration.pkg,
+			declaration.expression,
+			field,
+			bindings,
+		)
+		resolved = resolved || declarationResolved
+		result = appendUniqueFunctionTargets(result, targets)
+	}
+	return result, resolved
+}
+
+func (resolver *valueFlowResolver) functionReturnFieldTargets(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	target functionTarget,
+	current functionBindings,
+	field *types.Var,
+) ([]functionTarget, bool) {
+	signature, body, pkg := resolver.functionTargetBody(target)
+	if signature == nil || body == nil || signature.Results().Len() == 0 {
+		return nil, false
+	}
+	bindings := mergeFunctionBindings(
+		target.captured,
+		resolver.callFunctionBindings(caller, call, signature, current),
+	)
+	var result []functionTarget
+	resolved := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		if _, nested := node.(*ast.FuncLit); nested {
+			return false
+		}
+		returnStatement, ok := node.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, expression := range returnStatement.Results {
+			targets, expressionResolved := resolver.functionFieldTargets(
+				pkg,
+				expression,
+				field,
+				bindings,
+			)
+			resolved = resolved || expressionResolved
+			result = appendUniqueFunctionTargets(result, targets)
+		}
+		return true
+	})
+	return result, resolved
+}
+
 func (resolver *valueFlowResolver) functionTargetsForObject(
 	object types.Object,
 	bindings functionBindings,
@@ -362,7 +524,10 @@ func (resolver *valueFlowResolver) functionReturnTargets(
 	}
 	defer resolver.stopResolving(key)
 
-	bindings := resolver.callFunctionBindings(caller, call, signature, current)
+	bindings := mergeFunctionBindings(
+		target.captured,
+		resolver.callFunctionBindings(caller, call, signature, current),
+	)
 	var result []functionTarget
 	ast.Inspect(body, func(node ast.Node) bool {
 		if _, nested := node.(*ast.FuncLit); nested {
@@ -427,6 +592,14 @@ func appendUniqueFunctionTargets(existing, candidates []functionTarget) []functi
 }
 
 func functionTargetKey(target functionTarget) string {
+	identity := functionTargetIdentity(target)
+	if len(target.captured) > 0 {
+		identity += functionBindingCandidatesKey(target.captured)
+	}
+	return identity
+}
+
+func functionTargetIdentity(target functionTarget) string {
 	if target.literal != nil {
 		return fmt.Sprintf("literal:%p", target.literal)
 	}
@@ -441,13 +614,30 @@ func functionBindingCandidatesKey(bindings functionBindings) string {
 	for object, targets := range bindings {
 		targetKeys := make([]string, 0, len(targets))
 		for _, target := range targets {
-			targetKeys = append(targetKeys, functionTargetKey(target))
+			targetKeys = append(targetKeys, functionTargetIdentity(target))
 		}
 		sort.Strings(targetKeys)
 		parts = append(parts, object.Name()+"="+strings.Join(targetKeys, "|"))
 	}
 	sort.Strings(parts)
 	return "::functions:" + strings.Join(parts, ",")
+}
+
+func cloneFunctionBindings(bindings functionBindings) functionBindings {
+	return mergeFunctionBindings(nil, bindings)
+}
+
+func mergeFunctionBindings(bindings ...functionBindings) functionBindings {
+	var result functionBindings
+	for _, current := range bindings {
+		for object, targets := range current {
+			if result == nil {
+				result = make(functionBindings)
+			}
+			result[object] = appendUniqueFunctionTargets(result[object], targets)
+		}
+	}
+	return result
 }
 
 func interfaceDependencies(
@@ -1270,7 +1460,10 @@ func (resolver *valueFlowResolver) functionTargetResultTypes(
 		return nil
 	}
 	bindings := resolver.callBindings(caller, call, signature, current, currentFunctions)
-	functionBindings := resolver.callFunctionBindings(caller, call, signature, currentFunctions)
+	functionBindings := mergeFunctionBindings(
+		target.captured,
+		resolver.callFunctionBindings(caller, call, signature, currentFunctions),
+	)
 	key := functionTargetKey(target) +
 		bindingCandidatesKey(bindings) +
 		functionBindingCandidatesKey(functionBindings) +
