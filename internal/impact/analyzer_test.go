@@ -664,6 +664,81 @@ func Start() { runner.Run(Service{}) }
 	})
 }
 
+func TestAnalyzeDoesNotMixFactoriesPassedToSameCallback(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+
+func Use(factory func() Service) {
+	factory().Run()
+}
+`)
+	writeModuleFile(t, repo, "first/first.go", `package first
+
+import (
+	"example.com/app/runner"
+)
+
+type Service struct{}
+
+func (Service) Run() { println("old") }
+func New() runner.Service { return Service{} }
+func Start() { runner.Use(New) }
+`)
+	writeModuleFile(t, repo, "second/second.go", `package second
+
+import (
+	"example.com/app/runner"
+)
+
+type Service struct{}
+
+func (Service) Run() {}
+func New() runner.Service { return Service{} }
+func Start() { runner.Use(New) }
+`)
+	writeModuleFile(t, repo, "cmd/first/main.go", `package main
+
+import "example.com/app/first"
+
+func main() { first.Start() }
+`)
+	writeModuleFile(t, repo, "cmd/second/main.go", `package main
+
+import "example.com/app/second"
+
+func main() { second.Start() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "first/first.go", `package first
+
+import (
+	"example.com/app/runner"
+)
+
+type Service struct{}
+
+func (Service) Run() { println("new") }
+func New() runner.Service { return Service{} }
+func Start() { runner.Use(New) }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/first.main",
+		"first.first",
+		"runner.runner",
+	})
+}
+
 func TestAnalyzePropagatesConcreteMethodStoredInInterfaceField(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "service/service.go", `package service

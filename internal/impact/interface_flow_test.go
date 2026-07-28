@@ -355,6 +355,73 @@ func main() {
 			want: []string{"cmd/server.main", "service.service"},
 		},
 		{
+			name: "function callback parameter",
+			files: map[string]string{
+				"runner/runner.go": `package runner
+
+type Service interface {
+	Run()
+}
+
+func Use(factory func() Service) {
+	factory().Run()
+}
+`,
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service {
+	return service.Service{}
+}
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	runner.Use(factory.New)
+}
+`,
+			},
+			want: []string{"cmd/server.main", "runner.runner", "service.service"},
+		},
+		{
+			name: "function returned from factory",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service {
+	return service.Service{}
+}
+
+func Select() func() runner.Service {
+	return New
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.Select()().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
 			name: "type switch interface case",
 			files: map[string]string{
 				"cmd/server/main.go": `package main
