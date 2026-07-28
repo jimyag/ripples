@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"io"
@@ -62,8 +63,8 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 			gopackages.NeedEmbedFiles |
 			gopackages.NeedSyntax |
 			gopackages.NeedTypes |
-			gopackages.NeedTypesInfo |
-			gopackages.NeedTypesSizes,
+			gopackages.NeedTypesInfo,
+		ParseFile: parseAnalysisFile,
 	}
 	loaded, err := gopackages.Load(cfg, "./...")
 	if err != nil {
@@ -71,6 +72,9 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 	}
 	if len(loaded) == 0 {
 		return PackageSnapshot{}, fmt.Errorf("no Go packages found")
+	}
+	for _, pkg := range loaded {
+		trimUnusedTypeInfo(pkg.TypesInfo)
 	}
 
 	var packageErrors []string
@@ -115,6 +119,29 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 		return PackageSnapshot{}, err
 	}
 	return result, nil
+}
+
+func parseAnalysisFile(
+	fset *token.FileSet,
+	filename string,
+	src []byte,
+) (*ast.File, error) {
+	return parser.ParseFile(
+		fset,
+		filename,
+		src,
+		parser.ParseComments|parser.AllErrors|parser.SkipObjectResolution,
+	)
+}
+
+func trimUnusedTypeInfo(info *types.Info) {
+	if info == nil {
+		return
+	}
+	info.Instances = nil
+	info.Scopes = nil
+	info.InitOrder = nil
+	info.FileVersions = nil
 }
 
 func summarizePackage(root, modulePath string, pkg *gopackages.Package) (Package, error) {

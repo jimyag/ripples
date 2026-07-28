@@ -32,6 +32,7 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 	resolver := valueFlowResolver{
 		functions:      functions,
 		functionValues: functionValueDeclarations(declarations),
+		usedObjects:    packageUsedObjects(loaded),
 	}
 	globalBindings := packageInterfaceBindings(declarations, &resolver)
 	resolver.globalBindings = globalBindings
@@ -941,7 +942,7 @@ func interfaceDependencies(
 				fieldUses,
 				resolver,
 				bindings,
-				callResultUsed(declaration, typedNode, parents),
+				callResultUsed(declaration, typedNode, parents, resolver.usedObjects[declaration.pkg]),
 			)
 			for _, fallback := range dependencyInterfaceFallbackSymbols(
 				declaration,
@@ -1161,6 +1162,7 @@ func callResultUsed(
 	declaration symbolDeclaration,
 	call *ast.CallExpr,
 	parents map[ast.Node]ast.Node,
+	usedObjects map[types.Object]struct{},
 ) bool {
 	parent := parents[call]
 	switch typedParent := parent.(type) {
@@ -1174,7 +1176,7 @@ func callResultUsed(
 			if len(typedParent.Rhs) == 1 && len(typedParent.Lhs) > 1 {
 				for _, left := range typedParent.Lhs {
 					if identifier, ok := left.(*ast.Ident); ok && identifier.Name != "_" {
-						return objectIsUsed(declaration.pkg.TypesInfo, declaration.pkg.TypesInfo.Defs[identifier])
+						return objectIsUsed(usedObjects, declaration.pkg.TypesInfo.Defs[identifier])
 					}
 				}
 				return false
@@ -1193,22 +1195,32 @@ func callResultUsed(
 			if object == nil {
 				object = declaration.pkg.TypesInfo.Uses[identifier]
 			}
-			return objectIsUsed(declaration.pkg.TypesInfo, object)
+			return objectIsUsed(usedObjects, object)
 		}
 	}
 	return true
 }
 
-func objectIsUsed(info *types.Info, object types.Object) bool {
+func packageUsedObjects(loaded []*gopackages.Package) map[*gopackages.Package]map[types.Object]struct{} {
+	result := make(map[*gopackages.Package]map[types.Object]struct{}, len(loaded))
+	for _, pkg := range loaded {
+		used := make(map[types.Object]struct{})
+		for _, object := range pkg.TypesInfo.Uses {
+			if object != nil {
+				used[object] = struct{}{}
+			}
+		}
+		result[pkg] = used
+	}
+	return result
+}
+
+func objectIsUsed(usedObjects map[types.Object]struct{}, object types.Object) bool {
 	if object == nil {
 		return false
 	}
-	for _, used := range info.Uses {
-		if used == object {
-			return true
-		}
-	}
-	return false
+	_, used := usedObjects[object]
+	return used
 }
 
 type interfaceMethodUse struct {
@@ -1577,6 +1589,7 @@ func appendUniqueType(existing []types.Type, candidate types.Type) []types.Type 
 type valueFlowResolver struct {
 	functions      map[*types.Func]symbolDeclaration
 	functionValues map[types.Object][]functionValueDeclaration
+	usedObjects    map[*gopackages.Package]map[types.Object]struct{}
 	globalBindings map[types.Object][]types.Type
 	fieldBindings  map[types.Object][]types.Type
 	resolving      map[string]struct{}
