@@ -16,6 +16,10 @@
   <a href="#在-github-actions-中使用">GitHub Actions</a>
 </p>
 
+<p align="center">
+  <strong>简体中文</strong> · <a href="./README.en.md">English</a>
+</p>
+
 ---
 
 ripples 基于 Go AST、类型信息和声明依赖图，分析两个 Git revision 之间受直接或间接影响的 Go package。它关注代码是否实际引用了变更声明，而不是简单返回所有 import 变更 package 的调用方。
