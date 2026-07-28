@@ -1737,6 +1737,100 @@ func NewSecond() runner.Service { return Second{} }
 	})
 }
 
+func TestAnalyzeKeepsFunctionStorageLocationsIndependent(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "example.com/app/runner"
+
+type First struct{}
+
+func (First) Run() {}
+
+type Second struct{}
+
+func (Second) Run() { println("old") }
+
+func NewFirst() runner.Service { return First{} }
+func NewSecond() runner.Service { return Second{} }
+`)
+	writeModuleFile(t, repo, "holder/holder.go", `package holder
+
+import "example.com/app/runner"
+
+type Holder struct {
+	Factory func() runner.Service
+}
+`)
+	writeModuleFile(t, repo, "cmd/slice/main.go", `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	factories := []func() runner.Service{service.NewFirst, service.NewSecond}
+	factories[0]().Run()
+}
+`)
+	writeModuleFile(t, repo, "cmd/map/main.go", `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	factories := make(map[string]func() runner.Service)
+	factories["first"] = service.NewFirst
+	factories["second"] = service.NewSecond
+	factories["first"]().Run()
+}
+`)
+	writeModuleFile(t, repo, "cmd/field/main.go", `package main
+
+import (
+	"example.com/app/holder"
+	"example.com/app/service"
+)
+
+func main() {
+	first := holder.Holder{Factory: service.NewFirst}
+	second := holder.Holder{Factory: service.NewSecond}
+	_ = second
+	first.Factory().Run()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "example.com/app/runner"
+
+type First struct{}
+
+func (First) Run() {}
+
+type Second struct{}
+
+func (Second) Run() { println("new") }
+
+func NewFirst() runner.Service { return First{} }
+func NewSecond() runner.Service { return Second{} }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"service.service",
+	})
+}
+
 func TestAnalyzeDoesNotMixFunctionsFromMultipleReturnValues(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "runner/runner.go", `package runner

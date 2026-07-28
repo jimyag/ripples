@@ -137,6 +137,8 @@ type functionValueDeclaration struct {
 	pkg         *gopackages.Package
 	expression  ast.Expr
 	resultIndex int
+	field       *types.Var
+	index       ast.Expr
 }
 
 type functionTarget struct {
@@ -203,14 +205,32 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 						continue
 					}
 					object := assignedObject(declaration.pkg.TypesInfo, left)
+					var (
+						field      *types.Var
+						valueIndex ast.Expr
+					)
 					if selector, ok := left.(*ast.SelectorExpr); ok {
-						object = selectionObject(declaration.pkg.TypesInfo.Selections[selector])
+						field, _ = selectionObject(declaration.pkg.TypesInfo.Selections[selector]).(*types.Var)
+						if receiver := assignedObject(declaration.pkg.TypesInfo, selector.X); receiver != nil {
+							object = receiver
+						} else {
+							object = field
+						}
 					}
-					result[object] = append(result[object], functionValueDeclaration{
+					if indexed, ok := left.(*ast.IndexExpr); ok {
+						valueIndex = indexed.Index
+					}
+					valueDeclaration := functionValueDeclaration{
 						pkg:         declaration.pkg,
 						expression:  value,
 						resultIndex: resultIndex,
-					})
+						field:       field,
+						index:       valueIndex,
+					}
+					result[object] = append(result[object], valueDeclaration)
+					if field != nil && object != field {
+						result[field] = append(result[field], valueDeclaration)
+					}
 				}
 			case *ast.RangeStmt:
 				value, _ := typedNode.Value.(*ast.Ident)
@@ -302,7 +322,12 @@ func (resolver *valueFlowResolver) functionTargets(
 		}
 	case *ast.IndexExpr:
 		if isFunctionContainer(pkg.TypesInfo.TypeOf(typedExpression.X)) {
-			return resolver.functionTargets(pkg, typedExpression.X, bindings, resultIndex)
+			return resolver.functionIndexedTargets(
+				pkg,
+				typedExpression.X,
+				typedExpression.Index,
+				bindings,
+			)
 		}
 	case *ast.SelectorExpr:
 		selection := pkg.TypesInfo.Selections[typedExpression]
@@ -404,6 +429,162 @@ func isFunctionContainer(typ types.Type) bool {
 	}
 }
 
+func (resolver *valueFlowResolver) functionIndexedTargets(
+	pkg *gopackages.Package,
+	container ast.Expr,
+	index ast.Expr,
+	bindings functionBindings,
+) []functionTarget {
+	queryKey, queryKnown := expressionConstantKey(pkg, index)
+	return resolver.functionIndexedTargetsKey(pkg, container, bindings, queryKey, queryKnown)
+}
+
+func (resolver *valueFlowResolver) functionIndexedTargetsKey(
+	pkg *gopackages.Package,
+	container ast.Expr,
+	bindings functionBindings,
+	queryKey string,
+	queryKnown bool,
+) []functionTarget {
+	switch typedContainer := container.(type) {
+	case *ast.ParenExpr:
+		return resolver.functionIndexedTargetsKey(pkg, typedContainer.X, bindings, queryKey, queryKnown)
+	case *ast.CompositeLit:
+		return resolver.compositeIndexedFunctionTargets(pkg, typedContainer, bindings, queryKey, queryKnown)
+	case *ast.CallExpr:
+		var result []functionTarget
+		for _, target := range resolver.functionTargets(pkg, typedContainer.Fun, bindings, 0) {
+			signature, body, targetPackage := resolver.functionTargetBody(target)
+			if signature == nil || body == nil || signature.Results().Len() == 0 {
+				continue
+			}
+			targetBindings := mergeFunctionBindings(
+				target.captured,
+				resolver.callTargetFunctionBindings(pkg, typedContainer, target, signature, bindings),
+			)
+			ast.Inspect(body, func(node ast.Node) bool {
+				if _, nested := node.(*ast.FuncLit); nested {
+					return false
+				}
+				returnStatement, ok := node.(*ast.ReturnStmt)
+				if !ok {
+					return true
+				}
+				for _, expression := range returnStatement.Results {
+					result = appendUniqueFunctionTargets(
+						result,
+						resolver.functionIndexedTargetsKey(
+							targetPackage,
+							expression,
+							targetBindings,
+							queryKey,
+							queryKnown,
+						),
+					)
+				}
+				return true
+			})
+		}
+		return result
+	}
+
+	object := assignedObject(pkg.TypesInfo, container)
+	if object == nil {
+		return resolver.functionTargets(pkg, container, bindings, 0)
+	}
+	var result []functionTarget
+	result = appendUniqueFunctionTargets(result, bindings[object])
+	for _, declaration := range resolver.functionValues[object] {
+		if declaration.index != nil {
+			storedKey, storedKnown := expressionConstantKey(declaration.pkg, declaration.index)
+			if queryKnown && storedKnown && queryKey != storedKey {
+				continue
+			}
+			result = appendUniqueFunctionTargets(
+				result,
+				resolver.functionTargets(
+					declaration.pkg,
+					declaration.expression,
+					bindings,
+					declaration.resultIndex,
+				),
+			)
+			continue
+		}
+		if composite, ok := declaration.expression.(*ast.CompositeLit); ok && queryKnown {
+			result = appendUniqueFunctionTargets(
+				result,
+				resolver.compositeIndexedFunctionTargets(
+					declaration.pkg,
+					composite,
+					bindings,
+					queryKey,
+					queryKnown,
+				),
+			)
+			continue
+		}
+		result = appendUniqueFunctionTargets(
+			result,
+			resolver.functionTargets(
+				declaration.pkg,
+				declaration.expression,
+				bindings,
+				declaration.resultIndex,
+			),
+		)
+	}
+	return result
+}
+
+func (resolver *valueFlowResolver) compositeIndexedFunctionTargets(
+	pkg *gopackages.Package,
+	composite *ast.CompositeLit,
+	bindings functionBindings,
+	queryKey string,
+	known bool,
+) []functionTarget {
+	if !known {
+		return resolver.functionTargets(pkg, composite, bindings, 0)
+	}
+	var result []functionTarget
+	for elementIndex, element := range composite.Elts {
+		value := ast.Expr(element)
+		elementKey := strconv.Itoa(elementIndex)
+		if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
+			value = keyValue.Value
+			var keyKnown bool
+			elementKey, keyKnown = expressionConstantKey(pkg, keyValue.Key)
+			if !keyKnown {
+				result = appendUniqueFunctionTargets(
+					result,
+					resolver.functionTargets(pkg, value, bindings, 0),
+				)
+				continue
+			}
+		}
+		if elementKey != queryKey {
+			continue
+		}
+		result = appendUniqueFunctionTargets(
+			result,
+			resolver.functionTargets(pkg, value, bindings, 0),
+		)
+	}
+	return result
+}
+
+func expressionConstantKey(pkg *gopackages.Package, expression ast.Expr) (string, bool) {
+	if pkg == nil || expression == nil {
+		return "", false
+	}
+	value := pkg.TypesInfo.Types[expression].Value
+	if value == nil {
+		return "", false
+	}
+	return value.ExactString(), true
+}
+
 func (resolver *valueFlowResolver) functionFieldTargets(
 	pkg *gopackages.Package,
 	receiver ast.Expr,
@@ -462,6 +643,22 @@ func (resolver *valueFlowResolver) functionFieldTargets(
 	var result []functionTarget
 	resolved := false
 	for _, declaration := range declarations {
+		if declaration.field != nil {
+			if declaration.field != field {
+				continue
+			}
+			resolved = true
+			result = appendUniqueFunctionTargets(
+				result,
+				resolver.functionTargets(
+					declaration.pkg,
+					declaration.expression,
+					bindings,
+					declaration.resultIndex,
+				),
+			)
+			continue
+		}
 		targets, declarationResolved := resolver.functionFieldTargets(
 			declaration.pkg,
 			declaration.expression,
