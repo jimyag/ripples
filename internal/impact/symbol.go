@@ -168,21 +168,40 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 						})
 					}
 				}
+			case *ast.CompositeLit:
+				structType, _ := namedStruct(declaration.pkg.TypesInfo.TypeOf(typedNode))
+				if structType == nil {
+					return true
+				}
+				for index, element := range typedNode.Elts {
+					fieldIndex := index
+					value := ast.Expr(element)
+					if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
+						value = keyValue.Value
+						key, _ := keyValue.Key.(*ast.Ident)
+						field, _ := declaration.pkg.TypesInfo.Uses[key].(*types.Var)
+						fieldIndex = structFieldIndex(structType, field)
+					}
+					if fieldIndex < 0 || fieldIndex >= structType.NumFields() || !isFunctionValue(declaration.pkg, value) {
+						continue
+					}
+					field := structType.Field(fieldIndex)
+					result[field] = append(result[field], functionValueDeclaration{
+						pkg:        declaration.pkg,
+						expression: value,
+					})
+				}
 			case *ast.AssignStmt:
 				if len(typedNode.Lhs) != len(typedNode.Rhs) {
 					return true
 				}
 				for index, value := range typedNode.Rhs {
-					identifier, identifierOK := typedNode.Lhs[index].(*ast.Ident)
-					if !identifierOK {
-						continue
-					}
 					if !isFunctionValue(declaration.pkg, value) {
 						continue
 					}
-					object := declaration.pkg.TypesInfo.Defs[identifier]
-					if object == nil {
-						object = declaration.pkg.TypesInfo.Uses[identifier]
+					object := assignedObject(declaration.pkg.TypesInfo, typedNode.Lhs[index])
+					if selector, ok := typedNode.Lhs[index].(*ast.SelectorExpr); ok {
+						object = selectionObject(declaration.pkg.TypesInfo.Selections[selector])
 					}
 					result[object] = append(result[object], functionValueDeclaration{
 						pkg:        declaration.pkg,
