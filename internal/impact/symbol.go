@@ -156,17 +156,17 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 		ast.Inspect(declaration.node, func(node ast.Node) bool {
 			switch typedNode := node.(type) {
 			case *ast.ValueSpec:
-				if len(typedNode.Names) != len(typedNode.Values) {
-					return true
-				}
-				for index, value := range typedNode.Values {
-					if isFunctionValue(declaration.pkg, value) {
-						object := declaration.pkg.TypesInfo.Defs[typedNode.Names[index]]
-						result[object] = append(result[object], functionValueDeclaration{
-							pkg:        declaration.pkg,
-							expression: value,
-						})
+				for index, name := range typedNode.Names {
+					value, resultIndex := assignedExpression(typedNode.Values, index)
+					if value == nil || !containsFunctionValue(declaration.pkg.TypesInfo.TypeOf(name)) {
+						continue
 					}
+					object := declaration.pkg.TypesInfo.Defs[name]
+					result[object] = append(result[object], functionValueDeclaration{
+						pkg:         declaration.pkg,
+						expression:  value,
+						resultIndex: resultIndex,
+					})
 				}
 			case *ast.CompositeLit:
 				structType, _ := namedStruct(declaration.pkg.TypesInfo.TypeOf(typedNode))
@@ -182,7 +182,9 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 						field, _ := declaration.pkg.TypesInfo.Uses[key].(*types.Var)
 						fieldIndex = structFieldIndex(structType, field)
 					}
-					if fieldIndex < 0 || fieldIndex >= structType.NumFields() || !isFunctionValue(declaration.pkg, value) {
+					if fieldIndex < 0 ||
+						fieldIndex >= structType.NumFields() ||
+						!containsFunctionValue(structType.Field(fieldIndex).Type()) {
 						continue
 					}
 					field := structType.Field(fieldIndex)
@@ -192,22 +194,43 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 					})
 				}
 			case *ast.AssignStmt:
-				if len(typedNode.Lhs) != len(typedNode.Rhs) {
-					return true
-				}
-				for index, value := range typedNode.Rhs {
-					if !isFunctionValue(declaration.pkg, value) {
+				for index, left := range typedNode.Lhs {
+					value, resultIndex := assignedExpression(typedNode.Rhs, index)
+					if value == nil || !containsFunctionValue(declaration.pkg.TypesInfo.TypeOf(left)) {
 						continue
 					}
-					object := assignedObject(declaration.pkg.TypesInfo, typedNode.Lhs[index])
-					if selector, ok := typedNode.Lhs[index].(*ast.SelectorExpr); ok {
+					object := assignedObject(declaration.pkg.TypesInfo, left)
+					if selector, ok := left.(*ast.SelectorExpr); ok {
 						object = selectionObject(declaration.pkg.TypesInfo.Selections[selector])
 					}
 					result[object] = append(result[object], functionValueDeclaration{
-						pkg:        declaration.pkg,
-						expression: value,
+						pkg:         declaration.pkg,
+						expression:  value,
+						resultIndex: resultIndex,
 					})
 				}
+			case *ast.RangeStmt:
+				value, _ := typedNode.Value.(*ast.Ident)
+				if value == nil || !containsFunctionValue(declaration.pkg.TypesInfo.TypeOf(value)) {
+					return true
+				}
+				object := declaration.pkg.TypesInfo.Defs[value]
+				if object == nil {
+					object = declaration.pkg.TypesInfo.Uses[value]
+				}
+				result[object] = append(result[object], functionValueDeclaration{
+					pkg:        declaration.pkg,
+					expression: typedNode.X,
+				})
+			case *ast.SendStmt:
+				if !containsFunctionValue(declaration.pkg.TypesInfo.TypeOf(typedNode.Chan)) {
+					return true
+				}
+				object := assignedObject(declaration.pkg.TypesInfo, typedNode.Chan)
+				result[object] = append(result[object], functionValueDeclaration{
+					pkg:        declaration.pkg,
+					expression: typedNode.Value,
+				})
 			}
 			return true
 		})
@@ -215,13 +238,26 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 	return result
 }
 
-func isFunctionValue(pkg *gopackages.Package, expression ast.Expr) bool {
-	typ := pkg.TypesInfo.TypeOf(expression)
+func containsFunctionValue(typ types.Type) bool {
 	if typ == nil {
 		return false
 	}
-	_, ok := typ.Underlying().(*types.Signature)
-	return ok
+	switch underlying := typ.Underlying().(type) {
+	case *types.Signature:
+		return true
+	case *types.Slice:
+		return containsFunctionValue(underlying.Elem())
+	case *types.Array:
+		return containsFunctionValue(underlying.Elem())
+	case *types.Map:
+		return containsFunctionValue(underlying.Elem())
+	case *types.Chan:
+		return containsFunctionValue(underlying.Elem())
+	case *types.Pointer:
+		return containsFunctionValue(underlying.Elem())
+	default:
+		return false
+	}
 }
 
 func (resolver *valueFlowResolver) functionTargets(
@@ -235,7 +271,30 @@ func (resolver *valueFlowResolver) functionTargets(
 		return []functionTarget{{pkg: pkg, literal: typedExpression}}
 	case *ast.ParenExpr:
 		return resolver.functionTargets(pkg, typedExpression.X, bindings, resultIndex)
+	case *ast.CompositeLit:
+		var result []functionTarget
+		for _, element := range typedExpression.Elts {
+			value := ast.Expr(element)
+			if keyValue, ok := element.(*ast.KeyValueExpr); ok {
+				value = keyValue.Value
+			}
+			result = appendUniqueFunctionTargets(
+				result,
+				resolver.functionTargets(pkg, value, bindings, 0),
+			)
+		}
+		return result
 	case *ast.CallExpr:
+		if identifier, ok := typedExpression.Fun.(*ast.Ident); ok && identifier.Name == "append" {
+			var result []functionTarget
+			for _, argument := range typedExpression.Args {
+				result = appendUniqueFunctionTargets(
+					result,
+					resolver.functionTargets(pkg, argument, bindings, 0),
+				)
+			}
+			return result
+		}
 		var result []functionTarget
 		for _, target := range resolver.functionTargets(pkg, typedExpression.Fun, bindings, 0) {
 			result = appendUniqueFunctionTargets(
@@ -957,6 +1016,11 @@ func assignedObject(info *types.Info, expression ast.Expr) types.Object {
 		return assignedObject(info, typedExpression.X)
 	case *ast.ParenExpr:
 		return assignedObject(info, typedExpression.X)
+	case *ast.UnaryExpr:
+		if typedExpression.Op == token.MUL || typedExpression.Op == token.ARROW {
+			return assignedObject(info, typedExpression.X)
+		}
+		return nil
 	default:
 		return nil
 	}
@@ -1738,6 +1802,11 @@ func calledObject(info *types.Info, expression ast.Expr) types.Object {
 		return calledObject(info, typedExpression.X)
 	case *ast.ParenExpr:
 		return calledObject(info, typedExpression.X)
+	case *ast.UnaryExpr:
+		if typedExpression.Op == token.MUL || typedExpression.Op == token.ARROW {
+			return calledObject(info, typedExpression.X)
+		}
+		return nil
 	default:
 		return nil
 	}

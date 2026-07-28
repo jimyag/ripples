@@ -460,6 +460,119 @@ func main() {
 			want: []string{"cmd/server.main", "service.service"},
 		},
 		{
+			name: "function stored in slice",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	factories := []func() runner.Service{factory.New}
+	factories[0]().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function stored in map",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	factories := make(map[string]func() runner.Service)
+	factories["primary"] = factory.New
+	factories["primary"]().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function sent through channel",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	factories := make(chan func() runner.Service, 1)
+	factories <- factory.New
+	(<-factories)().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function appended and ranged",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	var factories []func() runner.Service
+	factories = append(factories, factory.New)
+	for _, current := range factories {
+		current().Run()
+	}
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
 			name: "type switch interface case",
 			files: map[string]string{
 				"cmd/server/main.go": `package main
@@ -1252,6 +1365,66 @@ func main() {
 		Second: service.NewSecond,
 	}
 	current.First().Run()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "example.com/app/runner"
+
+type First struct{}
+
+func (First) Run() {}
+
+type Second struct{}
+
+func (Second) Run() { println("new") }
+
+func NewFirst() runner.Service { return First{} }
+func NewSecond() runner.Service { return Second{} }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"service.service",
+	})
+}
+
+func TestAnalyzeDoesNotMixDifferentFunctionContainers(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "example.com/app/runner"
+
+type First struct{}
+
+func (First) Run() {}
+
+type Second struct{}
+
+func (Second) Run() { println("old") }
+
+func NewFirst() runner.Service { return First{} }
+func NewSecond() runner.Service { return Second{} }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func main() {
+	first := []func() runner.Service{service.NewFirst}
+	second := []func() runner.Service{service.NewSecond}
+	_ = second
+	first[0]().Run()
 }
 `)
 	oldCommit := commitModule(t, repo, "old")
