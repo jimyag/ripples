@@ -370,6 +370,8 @@ task build
 task release-snapshot
 ```
 
+`task lint` uses golangci-lint to check every Go package and test file, including gofmt, gofumpt, and goimports formatting.
+
 Local builds are written to `bin/ripples`:
 
 ```bash

@@ -1,0 +1,52 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  relative-path-mode: gomod
+
+linters:
+  default: standard
+  enable:
+    - asciicheck
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errorlint
+    - gocheckcompilerdirectives
+    - gocritic
+    - gosec
+    - misspell
+    - modernize
+    - nilerr
+    - nilnesserr
+    - nolintlint
+    - unconvert
+    - unparam
+    - usetesting
+    - wastedassign
+  exclusions:
+    warn-unused: true
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - unparam
+      - path: internal/impact/(module|snapshot)\.go
+        text: "G304:"
+        linters:
+          - gosec
+      - path: internal/snapshot/source\.go
+        text: "G204:"
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

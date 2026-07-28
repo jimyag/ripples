@@ -368,6 +368,8 @@ task build
 task release-snapshot
 ```
 
+`task lint` 使用 golangci-lint 检查全部 Go package 和测试文件，并验证 gofmt、gofumpt、goimports 格式。
+
 本地构建结果位于 `bin/ripples`：
 
 ```bash

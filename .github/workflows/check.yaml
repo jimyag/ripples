@@ -22,13 +22,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - uses: arduino/setup-task@v3
-        with:
-          repo-token: ${{ github.token }}
-      - name: Install lint tools
-        run: task lint-deps
       - name: Lint
-        run: task lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          args: ./...
 
   test:
     runs-on: ubuntu-latest
