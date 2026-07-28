@@ -23,6 +23,8 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - uses: arduino/setup-task@v3
+        with:
+          repo-token: ${{ github.token }}
       - name: Install lint tools
         run: task lint-deps
       - name: Lint
@@ -40,6 +42,8 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - uses: arduino/setup-task@v3
+        with:
+          repo-token: ${{ github.token }}
       - name: Test
         run: task test
       - name: Upload coverage
@@ -58,5 +62,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - uses: arduino/setup-task@v3
+        with:
+          repo-token: ${{ github.token }}
       - name: Build
         run: task build
