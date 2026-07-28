@@ -61,7 +61,7 @@ func (c *Cache) Load(namespace, key string, value any) (bool, error) {
 // Store atomically writes a cached value.
 func (c *Cache) Store(namespace, key string, value any) error {
 	dir := filepath.Join(c.Dir, namespace)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create cache directory: %w", err)
 	}
 
@@ -75,7 +75,9 @@ func (c *Cache) Store(namespace, key string, value any) error {
 		return fmt.Errorf("create cache entry: %w", err)
 	}
 	tempName := file.Name()
-	defer os.Remove(tempName)
+	defer func() {
+		_ = os.Remove(tempName)
+	}()
 
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()

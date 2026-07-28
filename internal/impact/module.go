@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,7 +31,10 @@ type packageModules struct {
 	SumKeys []string `json:"sum_keys,omitempty"`
 }
 
-func (a *Analyzer) loadModuleSnapshot(ctx context.Context, repoPath, ref string) (*moduleSnapshot, error) {
+func (a *Analyzer) loadModuleSnapshot(
+	ctx context.Context,
+	repoPath, ref string,
+) (_ *moduleSnapshot, returnErr error) {
 	revision, err := snapshot.Resolve(ctx, repoPath, ref)
 	if err != nil {
 		return nil, err
@@ -49,7 +53,9 @@ func (a *Analyzer) loadModuleSnapshot(ctx context.Context, repoPath, ref string)
 	if err != nil {
 		return nil, err
 	}
-	defer source.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, source.Close())
+	}()
 
 	result, err = buildModuleSnapshot(ctx, source.Dir)
 	if err != nil {

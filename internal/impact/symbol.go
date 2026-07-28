@@ -182,7 +182,7 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 				}
 				for index, element := range typedNode.Elts {
 					fieldIndex := index
-					value := ast.Expr(element)
+					value := element
 					if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
 						value = keyValue.Value
 						key, _ := keyValue.Key.(*ast.Ident)
@@ -296,8 +296,8 @@ func containsFunctionValueSeen(
 		if !inspectStruct {
 			return false
 		}
-		for index := range underlying.NumFields() {
-			if containsFunctionValueSeen(underlying.Field(index).Type(), false, seen) {
+		for field := range underlying.Fields() {
+			if containsFunctionValueSeen(field.Type(), false, seen) {
 				return true
 			}
 		}
@@ -372,7 +372,7 @@ func (resolver *valueFlowResolver) functionTargets(
 	case *ast.CompositeLit:
 		var result []functionTarget
 		for _, element := range typedExpression.Elts {
-			value := ast.Expr(element)
+			value := element
 			if keyValue, ok := element.(*ast.KeyValueExpr); ok {
 				value = keyValue.Value
 			}
@@ -558,7 +558,7 @@ func (resolver *valueFlowResolver) compositeIndexedFunctionTargets(
 	}
 	var result []functionTarget
 	for elementIndex, element := range composite.Elts {
-		value := ast.Expr(element)
+		value := element
 		elementKey := strconv.Itoa(elementIndex)
 		if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
 			value = keyValue.Value
@@ -621,7 +621,7 @@ func (resolver *valueFlowResolver) functionFieldTargets(
 		}
 		for index, element := range typedReceiver.Elts {
 			fieldIndex := index
-			value := ast.Expr(element)
+			value := element
 			if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
 				value = keyValue.Value
 				key, _ := keyValue.Key.(*ast.Ident)
@@ -1009,7 +1009,7 @@ func interfaceDependencies(
 			}
 			for elementIndex, element := range typedNode.Elts {
 				fieldIndex := elementIndex
-				value := ast.Expr(element)
+				value := element
 				if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
 					value = keyValue.Value
 					key, _ := keyValue.Key.(*ast.Ident)
@@ -1421,7 +1421,7 @@ func packageFieldBindings(
 					}
 					for index, element := range typedNode.Elts {
 						fieldIndex := index
-						value := ast.Expr(element)
+						value := element
 						if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
 							value = keyValue.Value
 							key, _ := keyValue.Key.(*ast.Ident)
@@ -1655,7 +1655,7 @@ func (resolver *valueFlowResolver) expressionTypes(
 		case *types.Slice, *types.Array, *types.Map:
 			var result []types.Type
 			for _, element := range typedExpression.Elts {
-				value := ast.Expr(element)
+				value := element
 				if keyValue, ok := element.(*ast.KeyValueExpr); ok {
 					value = keyValue.Value
 				}
@@ -1738,7 +1738,7 @@ func (resolver *valueFlowResolver) callFieldTypes(
 			}
 			for index, element := range composite.Elts {
 				fieldIndex := index
-				value := ast.Expr(element)
+				value := element
 				if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
 					value = keyValue.Value
 					key, _ := keyValue.Key.(*ast.Ident)
@@ -2328,7 +2328,7 @@ func (tracer *interfaceCallTracer) traceCompositeLiteral(
 	}
 	for elementIndex, element := range composite.Elts {
 		fieldIndex := elementIndex
-		value := ast.Expr(element)
+		value := element
 		if keyValue, keyed := element.(*ast.KeyValueExpr); keyed {
 			value = keyValue.Value
 			key, _ := keyValue.Key.(*ast.Ident)
@@ -2434,8 +2434,7 @@ func concreteInterfaceMethods(
 	objectIDs map[types.Object]string,
 ) []string {
 	dependencies := make(map[string]struct{})
-	for methodIndex := range iface.NumMethods() {
-		required := iface.Method(methodIndex)
+	for required := range iface.Methods() {
 		object, _, _ := types.LookupFieldOrMethod(actualType, true, required.Pkg(), required.Name())
 		if id, ok := objectIDs[object]; ok {
 			dependencies[id] = struct{}{}

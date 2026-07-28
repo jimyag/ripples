@@ -105,16 +105,14 @@ type Config struct {
 	results := make(chan string, workers)
 	var group sync.WaitGroup
 	for range workers {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			got, hashErr := astHash(field, fset)
 			if hashErr != nil {
 				results <- hashErr.Error()
 				return
 			}
 			results <- got
-		}()
+		})
 	}
 	group.Wait()
 	close(results)

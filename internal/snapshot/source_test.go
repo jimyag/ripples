@@ -21,12 +21,20 @@ func TestOpenExtractsRequestedCommitWithoutChangingWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(old) error = %v", err)
 	}
-	defer oldSource.Close()
+	t.Cleanup(func() {
+		if err := oldSource.Close(); err != nil {
+			t.Errorf("Close(old) error = %v", err)
+		}
+	})
 	newSource, err := Open(context.Background(), repo, newCommit)
 	if err != nil {
 		t.Fatalf("Open(new) error = %v", err)
 	}
-	defer newSource.Close()
+	t.Cleanup(func() {
+		if err := newSource.Close(); err != nil {
+			t.Errorf("Close(new) error = %v", err)
+		}
+	})
 
 	assertFileContent(t, filepath.Join(oldSource.Dir, "value.txt"), "old")
 	assertFileContent(t, filepath.Join(newSource.Dir, "value.txt"), "new")
@@ -105,11 +113,9 @@ func TestOpenRevisionSupportsConcurrentWorktrees(t *testing.T) {
 	errors := make([]error, len(revisions))
 	var wait sync.WaitGroup
 	for index := range revisions {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
+		wait.Go(func() {
 			sources[index], errors[index] = OpenRevision(context.Background(), revisions[index])
-		}()
+		})
 	}
 	wait.Wait()
 	for index, err := range errors {
@@ -126,11 +132,9 @@ func TestOpenRevisionSupportsConcurrentWorktrees(t *testing.T) {
 	}
 
 	for index := range sources {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
+		wait.Go(func() {
 			errors[index] = sources[index].Close()
-		}()
+		})
 	}
 	wait.Wait()
 	for index, err := range errors {

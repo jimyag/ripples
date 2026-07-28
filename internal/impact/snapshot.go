@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -245,12 +246,14 @@ func objectKind(object types.Object) string {
 	}
 }
 
-func contentHash(filename string) (string, error) {
+func contentHash(filename string) (_ string, returnErr error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, file.Close())
+	}()
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
@@ -292,7 +295,7 @@ func relativePackagePath(modulePath, packagePath string) string {
 	if packagePath == modulePath {
 		return filepath.Base(modulePath)
 	}
-	if relative := strings.TrimPrefix(packagePath, modulePath+"/"); relative != packagePath {
+	if relative, ok := strings.CutPrefix(packagePath, modulePath+"/"); ok {
 		return relative
 	}
 	return packagePath

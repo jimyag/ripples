@@ -32,14 +32,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if *oldCommit == "" || *newCommit == "" {
-		fmt.Fprintln(stderr, "错误: 必须指定 -old 和 -new 参数")
+		_, _ = fmt.Fprintln(stderr, "错误: 必须指定 -old 和 -new 参数")
 		flags.Usage()
 		return 1
 	}
 
 	cache, err := snapshot.DefaultCache()
 	if err != nil {
-		fmt.Fprintf(stderr, "初始化缓存失败: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "初始化缓存失败: %v\n", err)
 		return 1
 	}
 
@@ -47,17 +47,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 	analyzer := impact.NewAnalyzer(cache)
 	analysis, err := analyzer.AnalyzeDetailed(context.Background(), *repoPath, *oldCommit, *newCommit)
 	if err != nil {
-		fmt.Fprintf(stderr, "分析失败: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "分析失败: %v\n", err)
 		return 1
 	}
 
 	reporter := output.NewAnalysisReporter(stdout, analysis)
 	if err := reporter.Print(*outputType); err != nil {
-		fmt.Fprintf(stderr, "输出失败: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "输出失败: %v\n", err)
 		return 1
 	}
 	if *verbose {
-		fmt.Fprintf(stderr, "分析完成: %d 个受影响包，耗时 %s\n", len(analysis.Packages), time.Since(started))
+		_, _ = fmt.Fprintf(
+			stderr,
+			"分析完成: %d 个受影响包，耗时 %s\n",
+			len(analysis.Packages),
+			time.Since(started),
+		)
 	}
 	return 0
 }

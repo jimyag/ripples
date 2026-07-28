@@ -2,7 +2,9 @@ package impact
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -186,7 +188,10 @@ func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (*Pac
 	return a.loadResolvedSnapshot(ctx, revision)
 }
 
-func (a *Analyzer) loadResolvedSnapshot(ctx context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
+func (a *Analyzer) loadResolvedSnapshot(
+	ctx context.Context,
+	revision *snapshot.Revision,
+) (_ *PackageSnapshot, returnErr error) {
 	key := analysisCacheKey("package-graph", revision)
 	var result PackageSnapshot
 	if a.cache != nil {
@@ -201,7 +206,9 @@ func (a *Analyzer) loadResolvedSnapshot(ctx context.Context, revision *snapshot.
 	if err != nil {
 		return nil, err
 	}
-	defer source.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, source.Close())
+	}()
 
 	result, err = buildPackageSnapshot(ctx, source)
 	if err != nil {
@@ -339,9 +346,7 @@ func packageImpactGraph(
 ) ([]string, []PackageEdge) {
 	symbols := make(map[string]Symbol)
 	for _, packageSnapshot := range snapshots {
-		for id, symbol := range packageSnapshot.Symbols {
-			symbols[id] = symbol
-		}
+		maps.Copy(symbols, packageSnapshot.Symbols)
 	}
 
 	changedPackages := make(map[string]struct{})
