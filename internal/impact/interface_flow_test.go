@@ -860,6 +860,153 @@ func main() {
 			want: []string{"cmd/server.main", "service.service"},
 		},
 		{
+			name: "function called with go",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	go factory.New().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function called with defer",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	defer factory.New().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function received in select",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	factories := make(chan func() runner.Service, 1)
+	factories <- factory.New
+	select {
+	case current := <-factories:
+		current().Run()
+	default:
+	}
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "variadic function callbacks",
+			files: map[string]string{
+				"runner/runner.go": `package runner
+
+type Service interface {
+	Run()
+}
+
+func Use(factories ...func() Service) {
+	for _, current := range factories {
+		current().Run()
+	}
+}
+`,
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	runner.Use(factory.New)
+}
+`,
+			},
+			want: []string{"cmd/server.main", "runner.runner", "service.service"},
+		},
+		{
+			name: "generic function callback",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+
+func Identity[T any](current T) T {
+	return current
+}
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	current := factory.Identity[func() runner.Service](factory.New)
+	current().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
 			name: "type switch interface case",
 			files: map[string]string{
 				"cmd/server/main.go": `package main
