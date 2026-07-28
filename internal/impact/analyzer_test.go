@@ -960,6 +960,43 @@ func main() { println(shared.B) }
 	}
 }
 
+func TestAnalyzeDoesNotPropagateCallsInsideStoredFunctionLiteralInitializer(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+func work() {}
+
+func Unchanged() {}
+`)
+	writeModuleFile(t, repo, "consumer/consumer.go", `package consumer
+
+import "example.com/app/shared"
+
+func Use() { shared.Unchanged() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+var handlers = []func(){
+	func() { work() },
+}
+
+func work() {}
+
+func Unchanged() {}
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"shared.shared",
+	})
+}
+
 func TestAnalyzePropagatesPackageInitializationForms(t *testing.T) {
 	tests := []struct {
 		name string
@@ -998,6 +1035,17 @@ var State = setup()
 func setup() string { return "new" }
 
 var State = setup()
+`,
+		},
+		{
+			name: "immediately invoked function literal",
+			old: `package startup
+
+var State = func() string { return "old" }()
+`,
+			new: `package startup
+
+var State = func() string { return "new" }()
 `,
 		},
 	}

@@ -2736,6 +2736,11 @@ func hasInitializationEffect(expressions []ast.Expr) bool {
 	for _, expression := range expressions {
 		ast.Inspect(expression, func(node ast.Node) bool {
 			switch typedNode := node.(type) {
+			case *ast.FuncLit:
+				// Creating a function value does not execute its body. An
+				// immediately invoked function literal is still effectful
+				// because its enclosing CallExpr is visited first.
+				return false
 			case *ast.CallExpr:
 				hasEffect = true
 				return false
