@@ -178,7 +178,18 @@ func init() {
 }
 
 func New() runner.Service {
-	return wrap(service.Service{}, true)
+	return Select(func() runner.Service {
+		return wrap(service.Service{}, true)
+	}, true)()
+}
+
+func Select(factory func() runner.Service, again bool) func() runner.Service {
+	if again {
+		return Select(func() runner.Service {
+			return factory()
+		}, false)
+	}
+	return factory
 }
 `)
 	writeModuleFile(t, repo, "cmd/server/main.go", `package main

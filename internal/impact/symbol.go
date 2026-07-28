@@ -34,6 +34,7 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 		functionValues: functionValueDeclarations(declarations),
 	}
 	globalBindings := packageInterfaceBindings(declarations, &resolver)
+	resolver.globalBindings = globalBindings
 	resolver.fieldBindings = packageFieldBindings(declarations, globalBindings, &resolver)
 
 	type declarationSummary struct {
@@ -262,10 +263,14 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 }
 
 func containsFunctionValue(typ types.Type) bool {
-	return containsFunctionValueSeen(typ, make(map[types.Type]struct{}))
+	return containsFunctionValueSeen(typ, true, make(map[types.Type]struct{}))
 }
 
-func containsFunctionValueSeen(typ types.Type, seen map[types.Type]struct{}) bool {
+func containsFunctionValueSeen(
+	typ types.Type,
+	inspectStruct bool,
+	seen map[types.Type]struct{},
+) bool {
 	if typ == nil {
 		return false
 	}
@@ -277,18 +282,21 @@ func containsFunctionValueSeen(typ types.Type, seen map[types.Type]struct{}) boo
 	case *types.Signature:
 		return true
 	case *types.Slice:
-		return containsFunctionValueSeen(underlying.Elem(), seen)
+		return containsFunctionValueSeen(underlying.Elem(), inspectStruct, seen)
 	case *types.Array:
-		return containsFunctionValueSeen(underlying.Elem(), seen)
+		return containsFunctionValueSeen(underlying.Elem(), inspectStruct, seen)
 	case *types.Map:
-		return containsFunctionValueSeen(underlying.Elem(), seen)
+		return containsFunctionValueSeen(underlying.Elem(), inspectStruct, seen)
 	case *types.Chan:
-		return containsFunctionValueSeen(underlying.Elem(), seen)
+		return containsFunctionValueSeen(underlying.Elem(), inspectStruct, seen)
 	case *types.Pointer:
-		return containsFunctionValueSeen(underlying.Elem(), seen)
+		return containsFunctionValueSeen(underlying.Elem(), inspectStruct, seen)
 	case *types.Struct:
+		if !inspectStruct {
+			return false
+		}
 		for index := range underlying.NumFields() {
-			if containsFunctionValueSeen(underlying.Field(index).Type(), seen) {
+			if containsFunctionValueSeen(underlying.Field(index).Type(), false, seen) {
 				return true
 			}
 		}
@@ -757,7 +765,10 @@ func (resolver *valueFlowResolver) functionReturnTargets(
 	if signature == nil || body == nil || resultIndex < 0 || resultIndex >= signature.Results().Len() {
 		return nil
 	}
-	key := functionTargetKey(target) + functionBindingCandidatesKey(current) + "::" + strconv.Itoa(resultIndex)
+	// A recursive call may reach the same function with progressively richer
+	// bindings. Those bindings affect precision, but they must not make the
+	// recursion guard itself unbounded.
+	key := "function-return-target:" + functionTargetIdentity(target) + "::" + strconv.Itoa(resultIndex)
 	if !resolver.startResolving(key) {
 		return nil
 	}
@@ -1262,12 +1273,29 @@ func packageInterfaceBindings(
 
 func declarationInterfaceBindings(
 	declaration symbolDeclaration,
-	global map[types.Object][]types.Type,
+	initial map[types.Object][]types.Type,
 	resolver *valueFlowResolver,
 ) map[types.Object][]types.Type {
-	result := make(map[types.Object][]types.Type, len(global))
-	for object, candidates := range global {
-		result[object] = append([]types.Type(nil), candidates...)
+	referenced := make(map[types.Object]struct{})
+	ast.Inspect(declaration.node, func(node ast.Node) bool {
+		identifier, ok := node.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		object := declaration.pkg.TypesInfo.Uses[identifier]
+		if object == nil {
+			object = declaration.pkg.TypesInfo.Defs[identifier]
+		}
+		if object != nil {
+			referenced[object] = struct{}{}
+		}
+		return true
+	})
+
+	result := make(map[types.Object][]types.Type, len(referenced))
+	for object := range referenced {
+		result[object] = appendUniqueTypes(result[object], resolver.globalBindings[object])
+		result[object] = appendUniqueTypes(result[object], initial[object])
 	}
 	ast.Inspect(declaration.node, func(node ast.Node) bool {
 		switch typedNode := node.(type) {
@@ -1280,9 +1308,13 @@ func declarationInterfaceBindings(
 					continue
 				}
 				object := assignedObject(declaration.pkg.TypesInfo, left)
+				targetType := declaration.pkg.TypesInfo.TypeOf(left)
+				if !acceptsInterfaceBinding(targetType) {
+					continue
+				}
 				addValueBinding(
 					object,
-					declaration.pkg.TypesInfo.TypeOf(left),
+					targetType,
 					resolver.expressionTypes(declaration.pkg, right, result, resultIndex),
 					result,
 				)
@@ -1296,9 +1328,13 @@ func declarationInterfaceBindings(
 			if object == nil {
 				object = declaration.pkg.TypesInfo.Uses[identifier]
 			}
+			targetType := declaration.pkg.TypesInfo.TypeOf(identifier)
+			if !acceptsInterfaceBinding(targetType) {
+				return true
+			}
 			addValueBinding(
 				object,
-				declaration.pkg.TypesInfo.TypeOf(identifier),
+				targetType,
 				resolver.expressionTypes(declaration.pkg, typedNode.X, result, 0),
 				result,
 			)
@@ -1321,9 +1357,13 @@ func declarationInterfaceBindings(
 			}
 		case *ast.SendStmt:
 			object := assignedObject(declaration.pkg.TypesInfo, typedNode.Chan)
+			targetType := declaration.pkg.TypesInfo.TypeOf(typedNode.Chan)
+			if !acceptsInterfaceBinding(targetType) {
+				return true
+			}
 			addValueBinding(
 				object,
-				declaration.pkg.TypesInfo.TypeOf(typedNode.Chan),
+				targetType,
 				resolver.expressionTypes(declaration.pkg, typedNode.Value, result, 0),
 				result,
 			)
@@ -1380,6 +1420,9 @@ func packageFieldBindings(
 							continue
 						}
 						field := structType.Field(fieldIndex)
+						if !acceptsInterfaceBinding(field.Type()) {
+							continue
+						}
 						addValueBinding(
 							field,
 							field.Type(),
@@ -1396,6 +1439,9 @@ func packageFieldBindings(
 						field, _ := selectionObject(declaration.pkg.TypesInfo.Selections[selector]).(*types.Var)
 						right, resultIndex := assignedExpression(typedNode.Rhs, index)
 						if field == nil || right == nil {
+							continue
+						}
+						if !acceptsInterfaceBinding(field.Type()) {
 							continue
 						}
 						addValueBinding(
@@ -1425,9 +1471,13 @@ func addValueSpecBindings(
 			continue
 		}
 		object := pkg.TypesInfo.Defs[name]
+		targetType := pkg.TypesInfo.TypeOf(name)
+		if !acceptsInterfaceBinding(targetType) {
+			continue
+		}
 		addValueBinding(
 			object,
-			pkg.TypesInfo.TypeOf(name),
+			targetType,
 			resolver.expressionTypes(pkg, value, bindings, resultIndex),
 			bindings,
 		)
@@ -1474,7 +1524,7 @@ func addValueBinding(
 	candidates []types.Type,
 	bindings map[types.Object][]types.Type,
 ) {
-	if object == nil || targetType == nil {
+	if object == nil || !acceptsInterfaceBinding(targetType) {
 		return
 	}
 	acceptedType := targetType
@@ -1495,6 +1545,25 @@ func addValueBinding(
 	}
 }
 
+func acceptsInterfaceBinding(targetType types.Type) bool {
+	if targetType == nil {
+		return false
+	}
+	acceptedType := targetType
+	switch underlying := targetType.Underlying().(type) {
+	case *types.Slice:
+		acceptedType = underlying.Elem()
+	case *types.Array:
+		acceptedType = underlying.Elem()
+	case *types.Map:
+		acceptedType = underlying.Elem()
+	case *types.Chan:
+		acceptedType = underlying.Elem()
+	}
+	_, ok := acceptedType.Underlying().(*types.Interface)
+	return ok
+}
+
 func appendUniqueType(existing []types.Type, candidate types.Type) []types.Type {
 	key := types.TypeString(candidate, packageQualifier)
 	for _, current := range existing {
@@ -1508,6 +1577,7 @@ func appendUniqueType(existing []types.Type, candidate types.Type) []types.Type 
 type valueFlowResolver struct {
 	functions      map[*types.Func]symbolDeclaration
 	functionValues map[types.Object][]functionValueDeclaration
+	globalBindings map[types.Object][]types.Type
 	fieldBindings  map[types.Object][]types.Type
 	resolving      map[string]struct{}
 }
@@ -1717,10 +1787,10 @@ func (resolver *valueFlowResolver) functionTargetResultTypes(
 		target.captured,
 		resolver.callTargetFunctionBindings(caller, call, target, signature, currentFunctions),
 	)
-	key := functionTargetKey(target) +
-		bindingCandidatesKey(bindings) +
-		functionBindingCandidatesKey(functionBindings) +
-		"::" + strconv.Itoa(resultIndex)
+	// Inspect every return in the active function once. Recursive calls can
+	// carry different bindings, but treating each binding set as a new stack
+	// frame creates unbounded analysis contexts in large repositories.
+	key := "function-result-types:" + functionTargetIdentity(target) + "::" + strconv.Itoa(resultIndex)
 	if !resolver.startResolving(key) {
 		return nil
 	}

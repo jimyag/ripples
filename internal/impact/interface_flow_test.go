@@ -39,6 +39,59 @@ func main() {
 			want: []string{"cmd/server.main", "service.service"},
 		},
 		{
+			name: "factory returns package variable",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+var current runner.Service = service.Service{}
+
+func New() runner.Service {
+	return current
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.New().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "factory returns concrete local",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service {
+	current := service.Service{}
+	return current
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.New().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
 			name: "forwarded return",
 			files: map[string]string{
 				"factory/factory.go": `package factory
