@@ -573,6 +573,63 @@ func main() {
 			want: []string{"cmd/server.main", "service.service"},
 		},
 		{
+			name: "function in multiple return values",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+
+func Select() (string, func() runner.Service) {
+	return "primary", New
+}
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	_, current := factory.Select()
+	current().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "function assigned through pointer",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/runner"
+)
+
+func main() {
+	var current func() runner.Service
+	target := &current
+	*target = factory.New
+	(*target)().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
 			name: "type switch interface case",
 			files: map[string]string{
 				"cmd/server/main.go": `package main
@@ -1442,6 +1499,69 @@ func (Second) Run() { println("new") }
 
 func NewFirst() runner.Service { return First{} }
 func NewSecond() runner.Service { return Second{} }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"service.service",
+	})
+}
+
+func TestAnalyzeDoesNotMixFunctionsFromMultipleReturnValues(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "example.com/app/runner"
+
+type First struct{}
+
+func (First) Run() {}
+
+type Second struct{}
+
+func (Second) Run() { println("old") }
+
+func NewFirst() runner.Service { return First{} }
+func NewSecond() runner.Service { return Second{} }
+
+func Select() (func() runner.Service, func() runner.Service) {
+	return NewFirst, NewSecond
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/service"
+
+func main() {
+	first, _ := service.Select()
+	first().Run()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "example.com/app/runner"
+
+type First struct{}
+
+func (First) Run() {}
+
+type Second struct{}
+
+func (Second) Run() { println("new") }
+
+func NewFirst() runner.Service { return First{} }
+func NewSecond() runner.Service { return Second{} }
+
+func Select() (func() runner.Service, func() runner.Service) {
+	return NewFirst, NewSecond
+}
 `)
 	newCommit := commitModule(t, repo, "new")
 

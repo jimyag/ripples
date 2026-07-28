@@ -271,6 +271,10 @@ func (resolver *valueFlowResolver) functionTargets(
 		return []functionTarget{{pkg: pkg, literal: typedExpression}}
 	case *ast.ParenExpr:
 		return resolver.functionTargets(pkg, typedExpression.X, bindings, resultIndex)
+	case *ast.UnaryExpr:
+		if typedExpression.Op == token.AND {
+			return resolver.functionTargets(pkg, typedExpression.X, bindings, resultIndex)
+		}
 	case *ast.CompositeLit:
 		var result []functionTarget
 		for _, element := range typedExpression.Elts {
@@ -1015,6 +1019,8 @@ func assignedObject(info *types.Info, expression ast.Expr) types.Object {
 	case *ast.IndexExpr:
 		return assignedObject(info, typedExpression.X)
 	case *ast.ParenExpr:
+		return assignedObject(info, typedExpression.X)
+	case *ast.StarExpr:
 		return assignedObject(info, typedExpression.X)
 	case *ast.UnaryExpr:
 		if typedExpression.Op == token.MUL || typedExpression.Op == token.ARROW {
@@ -1801,6 +1807,8 @@ func calledObject(info *types.Info, expression ast.Expr) types.Object {
 	case *ast.IndexListExpr:
 		return calledObject(info, typedExpression.X)
 	case *ast.ParenExpr:
+		return calledObject(info, typedExpression.X)
+	case *ast.StarExpr:
 		return calledObject(info, typedExpression.X)
 	case *ast.UnaryExpr:
 		if typedExpression.Op == token.MUL || typedExpression.Op == token.ARROW {
