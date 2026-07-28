@@ -199,6 +199,12 @@ ripples -repo . -old HEAD~1 -new HEAD -output dot > impact.dot
 dot -Tsvg impact.dot -o impact.svg
 ```
 
+The example below represents a declaration change in `payment.payment`. The impact follows actual references through `internal/order.order` and then reaches `cmd/server.main`:
+
+![Example ripples package impact graph](docs/impact-example.svg)
+
+[View the DOT output used to generate this image](docs/impact-example.dot)
+
 Generating DOT text does not require Graphviz. The `dot` command is only needed to convert that text to SVG, PNG, or another image format. The graph contains only packages involved in the current impact propagation; it is not a separate full import graph.
 
 DOT output always uses package-level nodes. ripples still computes impact from declaration relationships between functions, methods, fields, types, variables, and constants, but it does not render those declarations as separate nodes or emit a complete function call graph. This keeps propagation paths visible without making large repository graphs unreadable.

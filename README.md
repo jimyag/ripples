@@ -197,6 +197,12 @@ ripples -repo . -old HEAD~1 -new HEAD -output dot > impact.dot
 dot -Tsvg impact.dot -o impact.svg
 ```
 
+下面的示例表示 `payment.payment` 中的声明发生变化，影响沿实际引用关系传播到 `internal/order.order`，再传播到 `cmd/server.main`：
+
+![ripples package 影响关系图示例](docs/impact-example.svg)
+
+[查看生成该图片的 DOT 输出](docs/impact-example.dot)
+
 生成 DOT 文本不依赖 Graphviz；只有转换成 SVG、PNG 等图片时才需要安装 `dot`。图中只包含本次变更涉及的 package，关系来自同一次声明级影响传播，而不是单独生成的 import 图。
 
 DOT 图的展示粒度固定为 package。ripples 内部仍通过函数、方法、字段、类型、变量和常量等声明关系计算影响范围，但不会把这些声明画成独立节点，也不输出完整的函数调用图。这可以保留 package 之间的传播路径，同时避免大型仓库的图因声明节点过多而难以阅读。

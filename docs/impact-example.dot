@@ -1,0 +1,9 @@
+digraph ripples {
+	rankdir="LR";
+	n1[label="cmd/server.main",shape="box"];
+	n2[label="internal/order.order",shape="box"];
+	n3[color="#cf222e",label="payment.payment",penwidth="2",shape="box"];
+	n2->n1;
+	n3->n2;
+
+}

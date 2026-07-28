@@ -2,6 +2,8 @@ package output
 
 import (
 	"bytes"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/jimyag/ripples/internal/impact"
@@ -83,14 +85,12 @@ func TestReporterDOTPrintsReversePackageRelationships(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Print(dot) error = %v", err)
 	}
-	want := `digraph ripples {
-	rankdir="LR";
-	n1[label="cmd/server.main",shape="box"];
-	n2[label="internal/order.order",shape="box"];
-	n3[color="#cf222e",label="payment.payment",penwidth="2",shape="box"];
-	n2->n1;
-	n3->n2;` + "\n\t\n}\n"
-	if output.String() != want {
+	want, err := os.ReadFile("../../docs/impact-example.dot")
+	if err != nil {
+		t.Fatalf("ReadFile(impact-example.dot) error = %v", err)
+	}
+	got := strings.ReplaceAll(output.String(), "\n\t\n", "\n\n")
+	if got != string(want) {
 		t.Fatalf("Print(dot) = %q, want %q", output.String(), want)
 	}
 }
