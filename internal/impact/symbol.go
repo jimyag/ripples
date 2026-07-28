@@ -591,6 +591,15 @@ func (resolver *valueFlowResolver) functionFieldTargets(
 	field *types.Var,
 	bindings functionBindings,
 ) ([]functionTarget, bool) {
+	key := fmt.Sprintf("function-field:%p:%p", receiver, field)
+	if object := assignedObject(pkg.TypesInfo, receiver); object != nil {
+		key = fmt.Sprintf("function-field-object:%p:%p", object, field)
+	}
+	if !resolver.startResolving(key) {
+		return nil, true
+	}
+	defer resolver.stopResolving(key)
+
 	switch typedReceiver := receiver.(type) {
 	case *ast.ParenExpr:
 		return resolver.functionFieldTargets(pkg, typedReceiver.X, field, bindings)

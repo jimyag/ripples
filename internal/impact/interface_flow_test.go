@@ -573,6 +573,42 @@ func main() {
 			want: []string{"cmd/server.main", "service.service"},
 		},
 		{
+			name: "function appended to struct field",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+func New() runner.Service { return service.Service{} }
+`,
+				"holder/holder.go": `package holder
+
+import "example.com/app/runner"
+
+type Holder struct {
+	Factories []func() runner.Service
+}
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/holder"
+)
+
+func main() {
+	var current holder.Holder
+	current.Factories = append(current.Factories, factory.New)
+	current.Factories[0]().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
 			name: "function in multiple return values",
 			files: map[string]string{
 				"factory/factory.go": `package factory
