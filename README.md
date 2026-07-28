@@ -273,6 +273,7 @@ jobs:
 - 只分析当前 `GOOS`、`GOARCH` 和 build tags 对应的构建结果；需要覆盖多种构建配置时，应分别执行。
 - CGo preamble 和 `//go:` 编译指令会参与语义比较；声明级指令沿实际使用者传播，链接级指令按 package 保守传播。
 - 当前 module 内会追踪接口参数和字段、变量赋值、工厂及多返回值、闭包、泛型透传、类型断言和 type switch、方法值和方法表达式，以及 slice、map、channel、range 和 `append` 中可由 AST 与类型信息确定的具体实现。
+- 函数值可通过参数、返回值及多返回值、struct 字段、指针间接赋值、slice、map、channel、range 和 `append` 继续传播；同一静态位置存在多个运行时可能值时，结果会保守地包含全部候选。
 - 标准库和 `go.mod` 中的第三方依赖按黑盒处理，不遍历其函数体；本地具体值传入外部接口时，会按接口方法契约继续传播。
 - 临时 worktree 会保留同仓库本地 `replace` 的目录，使嵌套 module 可以正确加载；当前声明图仍只覆盖 `-repo` 指定的 module，同一提交直接修改其他本地 replacement module 时，尚不会跨 module 传播到调用方。
 - 反射、`unsafe`、`plugin`、运行时注册和只由外部配置决定的动态调用无法由 Go AST 完整确定，ripples 不猜测缺少静态证据的调用关系。
