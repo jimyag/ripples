@@ -219,6 +219,25 @@ func astFieldFilter(name string, value reflect.Value) bool {
 }
 
 func astHash(node ast.Node, fset *token.FileSet) (string, error) {
+	var restoreObjects []func()
+	ast.Inspect(node, func(current ast.Node) bool {
+		identifier, ok := current.(*ast.Ident)
+		if !ok || identifier.Obj == nil {
+			return true
+		}
+		object := identifier.Obj
+		restoreObjects = append(restoreObjects, func() {
+			identifier.Obj = object
+		})
+		identifier.Obj = nil
+		return true
+	})
+	defer func() {
+		for _, restore := range restoreObjects {
+			restore()
+		}
+	}()
+
 	hash := sha256.New()
 	if err := ast.Fprint(hash, fset, node, astFieldFilter); err != nil {
 		return "", err

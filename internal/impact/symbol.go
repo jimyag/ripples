@@ -1904,17 +1904,18 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 						}
 					case *ast.ValueSpec:
 						buildMetadataHash := declarationBuildMetadataHash(declaration.Doc, typedSpec.Doc, typedSpec.Comment)
-						for _, name := range typedSpec.Names {
+						for index, name := range typedSpec.Names {
 							object := pkg.TypesInfo.Defs[name]
 							if object == nil || name.Name == "_" {
 								continue
 							}
 							id := packageObjectID(pkg.PkgPath, objectKind(object), name.Name)
 							objectIDs[object] = id
+							valueNode := individualValueSpec(typedSpec, index)
 							symbol := symbolDeclaration{
 								id:                id,
-								node:              typedSpec,
-								hashNode:          typedSpec,
+								node:              valueNode,
+								hashNode:          valueNode,
 								buildMetadataHash: buildMetadataHash,
 								pkg:               pkg,
 							}
@@ -1929,6 +1930,26 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 		}
 	}
 	return declarations
+}
+
+func individualValueSpec(spec *ast.ValueSpec, index int) *ast.ValueSpec {
+	if spec == nil || index < 0 || index >= len(spec.Names) {
+		return spec
+	}
+	if len(spec.Values) == 1 && len(spec.Names) > 1 {
+		return spec
+	}
+	var values []ast.Expr
+	if index < len(spec.Values) {
+		values = []ast.Expr{spec.Values[index]}
+	}
+	return &ast.ValueSpec{
+		Doc:     spec.Doc,
+		Names:   []*ast.Ident{spec.Names[index]},
+		Type:    spec.Type,
+		Values:  values,
+		Comment: spec.Comment,
+	}
 }
 
 func functionID(packagePath string, declaration *ast.FuncDecl, info *types.Info, filename string, initIndex int) string {

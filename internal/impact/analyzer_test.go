@@ -899,6 +899,124 @@ func init() { setup() }
 	})
 }
 
+func TestAnalyzeKeepsPackageValueDeclarationsIndependent(t *testing.T) {
+	tests := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{
+			name: "variables",
+			old:  "var A, B = 1, 2\n",
+			new:  "var A, B = 1, 20\n",
+		},
+		{
+			name: "constants",
+			old:  "const A, B = 1, 2\n",
+			new:  "const A, B = 1, 20\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			writeModuleFile(t, repo, "shared/shared.go", "package shared\n\n"+test.old)
+			writeModuleFile(t, repo, "cmd/a/main.go", `package main
+
+import "example.com/app/shared"
+
+func main() { println(shared.A) }
+`)
+			writeModuleFile(t, repo, "cmd/b/main.go", `package main
+
+import "example.com/app/shared"
+
+func main() { println(shared.B) }
+`)
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, "shared/shared.go", "package shared\n\n"+test.new)
+			newCommit := commitModule(t, repo, "new")
+
+			analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+			got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+			if err != nil {
+				t.Fatalf("Analyze() error = %v", err)
+			}
+			assertPackages(t, got, []string{
+				"cmd/b.main",
+				"shared.shared",
+			})
+		})
+	}
+}
+
+func TestAnalyzePropagatesPackageInitializationForms(t *testing.T) {
+	tests := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{
+			name: "direct init body",
+			old: `package startup
+
+func init() {}
+`,
+			new: `package startup
+
+func init() { println("changed") }
+`,
+		},
+		{
+			name: "added init",
+			old:  "package startup\n",
+			new: `package startup
+
+func init() { println("added") }
+`,
+		},
+		{
+			name: "effectful package variable",
+			old: `package startup
+
+func setup() string { return "old" }
+
+var State = setup()
+`,
+			new: `package startup
+
+func setup() string { return "new" }
+
+var State = setup()
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			writeModuleFile(t, repo, "startup/startup.go", test.old)
+			writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import _ "example.com/app/startup"
+
+func main() {}
+`)
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, "startup/startup.go", test.new)
+			newCommit := commitModule(t, repo, "new")
+
+			analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+			got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+			if err != nil {
+				t.Fatalf("Analyze() error = %v", err)
+			}
+			assertPackages(t, got, []string{
+				"cmd/server.main",
+				"startup.startup",
+			})
+		})
+	}
+}
+
 func TestAnalyzePropagatesEmbeddedFileChange(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "resource/data.txt", "old")
