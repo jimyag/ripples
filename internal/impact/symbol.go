@@ -140,10 +140,12 @@ type functionValueDeclaration struct {
 }
 
 type functionTarget struct {
-	pkg      *gopackages.Package
-	literal  *ast.FuncLit
-	function *types.Func
-	captured functionBindings
+	pkg              *gopackages.Package
+	literal          *ast.FuncLit
+	function         *types.Func
+	receiver         ast.Expr
+	methodExpression bool
+	captured         functionBindings
 }
 
 type functionBindings map[types.Object][]functionTarget
@@ -315,6 +317,24 @@ func (resolver *valueFlowResolver) functionTargets(
 				return targets
 			}
 		}
+		if method, ok := selectionObject(selection).(*types.Func); ok {
+			switch selection.Kind() {
+			case types.MethodVal:
+				return []functionTarget{{
+					pkg:      pkg,
+					function: method,
+					receiver: typedExpression.X,
+					captured: cloneFunctionBindings(bindings),
+				}}
+			case types.MethodExpr:
+				return []functionTarget{{
+					pkg:              pkg,
+					function:         method,
+					methodExpression: true,
+					captured:         cloneFunctionBindings(bindings),
+				}}
+			}
+		}
 	case *ast.CompositeLit:
 		var result []functionTarget
 		for _, element := range typedExpression.Elts {
@@ -329,6 +349,11 @@ func (resolver *valueFlowResolver) functionTargets(
 		}
 		return result
 	case *ast.CallExpr:
+		if convertedType, ok := functionConversionType(pkg, typedExpression); ok &&
+			containsFunctionValue(convertedType) &&
+			len(typedExpression.Args) == 1 {
+			return resolver.functionTargets(pkg, typedExpression.Args[0], bindings, resultIndex)
+		}
 		if identifier, ok := typedExpression.Fun.(*ast.Ident); ok && identifier.Name == "append" {
 			var result []functionTarget
 			for _, argument := range typedExpression.Args {
@@ -357,6 +382,14 @@ func (resolver *valueFlowResolver) functionTargets(
 		return nil
 	}
 	return resolver.functionTargetsForObject(object, bindings, resultIndex)
+}
+
+func functionConversionType(pkg *gopackages.Package, call *ast.CallExpr) (types.Type, bool) {
+	if pkg == nil || call == nil {
+		return nil, false
+	}
+	value, ok := pkg.TypesInfo.Types[call.Fun]
+	return value.Type, ok && value.IsType()
 }
 
 func isFunctionContainer(typ types.Type) bool {
@@ -454,7 +487,7 @@ func (resolver *valueFlowResolver) functionReturnFieldTargets(
 	}
 	bindings := mergeFunctionBindings(
 		target.captured,
-		resolver.callFunctionBindings(caller, call, signature, current),
+		resolver.callTargetFunctionBindings(caller, call, target, signature, current),
 	)
 	var result []functionTarget
 	resolved := false
@@ -604,7 +637,14 @@ func functionTargetIdentity(target functionTarget) string {
 		return fmt.Sprintf("literal:%p", target.literal)
 	}
 	if target.function != nil {
-		return "function:" + target.function.FullName()
+		identity := "function:" + target.function.FullName()
+		if target.receiver != nil {
+			identity += fmt.Sprintf(":receiver:%p", target.receiver)
+		}
+		if target.methodExpression {
+			identity += ":method-expression"
+		}
+		return identity
 	}
 	return ""
 }
@@ -1459,10 +1499,17 @@ func (resolver *valueFlowResolver) functionTargetResultTypes(
 	if signature == nil || resultIndex < 0 || resultIndex >= signature.Results().Len() {
 		return nil
 	}
-	bindings := resolver.callBindings(caller, call, signature, current, currentFunctions)
+	bindings := resolver.callTargetBindings(
+		caller,
+		call,
+		target,
+		signature,
+		current,
+		currentFunctions,
+	)
 	functionBindings := mergeFunctionBindings(
 		target.captured,
-		resolver.callFunctionBindings(caller, call, signature, currentFunctions),
+		resolver.callTargetFunctionBindings(caller, call, target, signature, currentFunctions),
 	)
 	key := functionTargetKey(target) +
 		bindingCandidatesKey(bindings) +
@@ -1509,8 +1556,63 @@ func (resolver *valueFlowResolver) callBindings(
 	current map[types.Object][]types.Type,
 	functionContext ...functionBindings,
 ) map[types.Object][]types.Type {
+	return resolver.callBindingsOffset(caller, call, signature, current, 0, functionContext...)
+}
+
+func (resolver *valueFlowResolver) callTargetBindings(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	target functionTarget,
+	signature *types.Signature,
+	current map[types.Object][]types.Type,
+	functionContext ...functionBindings,
+) map[types.Object][]types.Type {
+	offset := 0
+	if target.methodExpression {
+		offset = 1
+	}
+	result := resolver.callBindingsOffset(
+		caller,
+		call,
+		signature,
+		current,
+		offset,
+		functionContext...,
+	)
+	if signature.Recv() == nil {
+		return result
+	}
+	receiver := target.receiver
+	receiverPackage := target.pkg
+	if target.methodExpression && len(call.Args) > 0 {
+		receiver = call.Args[0]
+		receiverPackage = caller
+	}
+	if receiver == nil {
+		return result
+	}
+	for _, candidate := range resolver.expressionTypes(
+		receiverPackage,
+		receiver,
+		current,
+		0,
+		functionContext...,
+	) {
+		result[signature.Recv()] = appendUniqueType(result[signature.Recv()], candidate)
+	}
+	return result
+}
+
+func (resolver *valueFlowResolver) callBindingsOffset(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	signature *types.Signature,
+	current map[types.Object][]types.Type,
+	offset int,
+	functionContext ...functionBindings,
+) map[types.Object][]types.Type {
 	result := make(map[types.Object][]types.Type)
-	for index, argument := range call.Args {
+	for index, argument := range call.Args[offset:] {
 		parameterIndex := index
 		if signature.Variadic() && parameterIndex >= signature.Params().Len() {
 			parameterIndex = signature.Params().Len() - 1
@@ -1539,8 +1641,32 @@ func (resolver *valueFlowResolver) callFunctionBindings(
 	signature *types.Signature,
 	current functionBindings,
 ) functionBindings {
+	return resolver.callFunctionBindingsOffset(caller, call, signature, current, 0)
+}
+
+func (resolver *valueFlowResolver) callTargetFunctionBindings(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	target functionTarget,
+	signature *types.Signature,
+	current functionBindings,
+) functionBindings {
+	offset := 0
+	if target.methodExpression {
+		offset = 1
+	}
+	return resolver.callFunctionBindingsOffset(caller, call, signature, current, offset)
+}
+
+func (resolver *valueFlowResolver) callFunctionBindingsOffset(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	signature *types.Signature,
+	current functionBindings,
+	offset int,
+) functionBindings {
 	result := make(functionBindings)
-	for index, argument := range call.Args {
+	for index, argument := range call.Args[offset:] {
 		parameterIndex := index
 		if signature.Variadic() && parameterIndex >= signature.Params().Len() {
 			parameterIndex = signature.Params().Len() - 1

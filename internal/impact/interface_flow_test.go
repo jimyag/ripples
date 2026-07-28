@@ -780,6 +780,86 @@ func main() {
 			want: []string{"cmd/server.main", "service.service"},
 		},
 		{
+			name: "function type conversion",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+type Factory func() runner.Service
+
+func New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	current := factory.Factory(factory.New)
+	current().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "bound receiver method value",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+type Factory struct{}
+
+func (Factory) New() runner.Service { return service.Service{} }
+`,
+				"cmd/server/main.go": `package main
+
+import "example.com/app/factory"
+
+func main() {
+	current := factory.Factory{}.New
+	current().Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "stored method expression",
+			files: map[string]string{
+				"factory/factory.go": `package factory
+
+import "example.com/app/runner"
+
+type Factory struct{}
+
+func (Factory) Forward(current runner.Service) runner.Service {
+	return current
+}
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/factory"
+	"example.com/app/service"
+)
+
+func main() {
+	current := factory.Factory.Forward
+	current(factory.Factory{}, service.Service{}).Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
 			name: "type switch interface case",
 			files: map[string]string{
 				"cmd/server/main.go": `package main
