@@ -133,8 +133,13 @@ func functionDeclarations(declarations []symbolDeclaration) map[*types.Func]symb
 	return result
 }
 
-func functionValueDeclarations(declarations []symbolDeclaration) map[types.Object]*ast.FuncLit {
-	result := make(map[types.Object]*ast.FuncLit)
+type functionValueDeclaration struct {
+	pkg        *gopackages.Package
+	expression ast.Expr
+}
+
+func functionValueDeclarations(declarations []symbolDeclaration) map[types.Object][]functionValueDeclaration {
+	result := make(map[types.Object][]functionValueDeclaration)
 	for _, declaration := range declarations {
 		if declaration.node == nil {
 			continue
@@ -146,9 +151,12 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 					return true
 				}
 				for index, value := range typedNode.Values {
-					literal, ok := value.(*ast.FuncLit)
-					if ok {
-						result[declaration.pkg.TypesInfo.Defs[typedNode.Names[index]]] = literal
+					if isFunctionValue(declaration.pkg, value) {
+						object := declaration.pkg.TypesInfo.Defs[typedNode.Names[index]]
+						result[object] = append(result[object], functionValueDeclaration{
+							pkg:        declaration.pkg,
+							expression: value,
+						})
 					}
 				}
 			case *ast.AssignStmt:
@@ -156,22 +164,36 @@ func functionValueDeclarations(declarations []symbolDeclaration) map[types.Objec
 					return true
 				}
 				for index, value := range typedNode.Rhs {
-					literal, ok := value.(*ast.FuncLit)
 					identifier, identifierOK := typedNode.Lhs[index].(*ast.Ident)
-					if !ok || !identifierOK {
+					if !identifierOK {
+						continue
+					}
+					if !isFunctionValue(declaration.pkg, value) {
 						continue
 					}
 					object := declaration.pkg.TypesInfo.Defs[identifier]
 					if object == nil {
 						object = declaration.pkg.TypesInfo.Uses[identifier]
 					}
-					result[object] = literal
+					result[object] = append(result[object], functionValueDeclaration{
+						pkg:        declaration.pkg,
+						expression: value,
+					})
 				}
 			}
 			return true
 		})
 	}
 	return result
+}
+
+func isFunctionValue(pkg *gopackages.Package, expression ast.Expr) bool {
+	typ := pkg.TypesInfo.TypeOf(expression)
+	if typ == nil {
+		return false
+	}
+	_, ok := typ.Underlying().(*types.Signature)
+	return ok
 }
 
 func interfaceDependencies(
@@ -788,7 +810,7 @@ func appendUniqueType(existing []types.Type, candidate types.Type) []types.Type 
 
 type valueFlowResolver struct {
 	functions      map[*types.Func]symbolDeclaration
-	functionValues map[types.Object]*ast.FuncLit
+	functionValues map[types.Object][]functionValueDeclaration
 	fieldBindings  map[types.Object][]types.Type
 	resolving      map[string]struct{}
 }
@@ -968,38 +990,81 @@ func (resolver *valueFlowResolver) callResultTypes(
 		bindings := resolver.callBindings(caller, call, signature, current)
 		return resolver.returnTypes(caller, literal.Body, signature, bindings, resultIndex)
 	}
-	if identifier, ok := call.Fun.(*ast.Ident); ok {
-		object := caller.TypesInfo.Uses[identifier]
-		if object == nil {
-			object = caller.TypesInfo.Defs[identifier]
+	if object := calledObject(caller.TypesInfo, call.Fun); object != nil {
+		var result []types.Type
+		for _, value := range resolver.functionValues[object] {
+			result = appendUniqueTypes(
+				result,
+				resolver.functionValueResultTypes(caller, call, value, current, resultIndex),
+			)
 		}
-		if literal := resolver.functionValues[object]; literal != nil {
-			signature, _ := caller.TypesInfo.TypeOf(literal).(*types.Signature)
-			if signature == nil {
-				return nil
-			}
-			key := fmt.Sprintf("function-value:%p::%d", literal, resultIndex)
-			if resolver.resolving == nil {
-				resolver.resolving = make(map[string]struct{})
-			}
-			if _, active := resolver.resolving[key]; active {
-				return nil
-			}
-			resolver.resolving[key] = struct{}{}
-			defer delete(resolver.resolving, key)
-
-			bindings := make(map[types.Object][]types.Type, len(current))
-			for currentObject, candidates := range current {
-				bindings[currentObject] = append([]types.Type(nil), candidates...)
-			}
-			for parameter, candidates := range resolver.callBindings(caller, call, signature, current) {
-				bindings[parameter] = appendUniqueTypes(bindings[parameter], candidates)
-			}
-			return resolver.returnTypes(caller, literal.Body, signature, bindings, resultIndex)
+		if len(result) > 0 {
+			return result
 		}
 	}
 
 	function, _ := calledObject(caller.TypesInfo, call.Fun).(*types.Func)
+	return resolver.namedFunctionResultTypes(caller, call, function, current, resultIndex)
+}
+
+func (resolver *valueFlowResolver) functionValueResultTypes(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	value functionValueDeclaration,
+	current map[types.Object][]types.Type,
+	resultIndex int,
+) []types.Type {
+	if literal, ok := value.expression.(*ast.FuncLit); ok {
+		signature, _ := value.pkg.TypesInfo.TypeOf(literal).(*types.Signature)
+		if signature == nil {
+			return nil
+		}
+		key := fmt.Sprintf("function-value:%p::%d", literal, resultIndex)
+		if !resolver.startResolving(key) {
+			return nil
+		}
+		defer resolver.stopResolving(key)
+
+		bindings := make(map[types.Object][]types.Type, len(current))
+		for currentObject, candidates := range current {
+			bindings[currentObject] = append([]types.Type(nil), candidates...)
+		}
+		for parameter, candidates := range resolver.callBindings(caller, call, signature, current) {
+			bindings[parameter] = appendUniqueTypes(bindings[parameter], candidates)
+		}
+		return resolver.returnTypes(value.pkg, literal.Body, signature, bindings, resultIndex)
+	}
+
+	object := calledObject(value.pkg.TypesInfo, value.expression)
+	if function, ok := object.(*types.Func); ok {
+		return resolver.namedFunctionResultTypes(caller, call, function, current, resultIndex)
+	}
+	if object == nil {
+		return nil
+	}
+	key := fmt.Sprintf("function-value-object:%p::%d", object, resultIndex)
+	if !resolver.startResolving(key) {
+		return nil
+	}
+	defer resolver.stopResolving(key)
+
+	var result []types.Type
+	for _, candidate := range resolver.functionValues[object] {
+		result = appendUniqueTypes(
+			result,
+			resolver.functionValueResultTypes(caller, call, candidate, current, resultIndex),
+		)
+	}
+	return result
+}
+
+func (resolver *valueFlowResolver) namedFunctionResultTypes(
+	caller *gopackages.Package,
+	call *ast.CallExpr,
+	function *types.Func,
+	current map[types.Object][]types.Type,
+	resultIndex int,
+) []types.Type {
 	declaration, ok := resolver.functions[function]
 	if !ok {
 		return nil
@@ -1010,14 +1075,10 @@ func (resolver *valueFlowResolver) callResultTypes(
 	}
 	bindings := resolver.callBindings(caller, call, signature, current)
 	key := function.FullName() + bindingCandidatesKey(bindings) + "::" + strconv.Itoa(resultIndex)
-	if resolver.resolving == nil {
-		resolver.resolving = make(map[string]struct{})
-	}
-	if _, active := resolver.resolving[key]; active {
+	if !resolver.startResolving(key) {
 		return nil
 	}
-	resolver.resolving[key] = struct{}{}
-	defer delete(resolver.resolving, key)
+	defer resolver.stopResolving(key)
 
 	bindings = declarationInterfaceBindings(declaration, bindings, resolver)
 	functionNode, _ := declaration.node.(*ast.FuncDecl)
@@ -1025,6 +1086,21 @@ func (resolver *valueFlowResolver) callResultTypes(
 		return nil
 	}
 	return resolver.returnTypes(declaration.pkg, functionNode.Body, signature, bindings, resultIndex)
+}
+
+func (resolver *valueFlowResolver) startResolving(key string) bool {
+	if resolver.resolving == nil {
+		resolver.resolving = make(map[string]struct{})
+	}
+	if _, active := resolver.resolving[key]; active {
+		return false
+	}
+	resolver.resolving[key] = struct{}{}
+	return true
+}
+
+func (resolver *valueFlowResolver) stopResolving(key string) {
+	delete(resolver.resolving, key)
 }
 
 func appendUniqueTypes(existing, candidates []types.Type) []types.Type {

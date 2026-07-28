@@ -1018,6 +1018,90 @@ func (*Service) Unused() { println("new") }
 	})
 }
 
+func TestAnalyzeTracksNamedFunctionAssignedToFunctionVariable(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "runner/runner.go", `package runner
+
+type Service interface {
+	Run()
+}
+`)
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Default struct{}
+
+func (Default) Run() {}
+
+type Enterprise struct{}
+
+func (Enterprise) Run() { println("old") }
+`)
+	writeModuleFile(t, repo, "factory/factory.go", `package factory
+
+import (
+	"example.com/app/runner"
+	"example.com/app/service"
+)
+
+var New func() runner.Service
+
+func NewDefault() runner.Service {
+	return service.Default{}
+}
+
+func NewEnterprise() runner.Service {
+	return service.Enterprise{}
+}
+`)
+	writeModuleFile(t, repo, "factory/init_default.go", `//go:build !enterprise
+
+package factory
+
+func init() {
+	New = NewDefault
+}
+`)
+	writeModuleFile(t, repo, "factory/init_enterprise.go", `//go:build enterprise
+
+package factory
+
+func init() {
+	New = NewEnterprise
+}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/factory"
+
+func main() {
+	factory.New().Run()
+}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+type Default struct{}
+
+func (Default) Run() {}
+
+type Enterprise struct{}
+
+func (Enterprise) Run() { println("new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	t.Setenv("GOFLAGS", "")
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"service.service",
+	})
+
+	t.Setenv("GOFLAGS", "-tags=enterprise")
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"cmd/server.main",
+		"service.service",
+	})
+}
+
 func assertAnalyzedPackages(t *testing.T, repo, oldCommit, newCommit string, want []string) {
 	t.Helper()
 	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})

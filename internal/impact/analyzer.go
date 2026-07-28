@@ -13,7 +13,7 @@ import (
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-const analysisVersion = "symbol-impact-v14"
+const analysisVersion = "symbol-impact-v15"
 
 // Analyzer computes declaration-level impact between two Git revisions.
 type Analyzer struct {
