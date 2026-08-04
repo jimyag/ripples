@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,24 +23,39 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("ripples", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		_, _ = fmt.Fprintln(stderr, "Usage: ripples -old <ref> -new <ref> [options]")
+		_, _ = fmt.Fprintln(stderr)
+		_, _ = fmt.Fprintln(stderr, "Analyze affected packages:")
+		_, _ = fmt.Fprintln(stderr, "  ripples -repo . -old HEAD~1 -new HEAD")
+		_, _ = fmt.Fprintln(stderr)
+		_, _ = fmt.Fprintln(stderr, "Export the package impact graph:")
+		_, _ = fmt.Fprintln(stderr, "  ripples -repo . -old origin/main -new HEAD -output dot > impact.dot")
+		_, _ = fmt.Fprintln(stderr)
+		_, _ = fmt.Fprintln(stderr, "Options:")
+		flags.PrintDefaults()
+	}
 
-	repoPath := flags.String("repo", ".", "Git 仓库内待分析的 Go module 目录")
-	oldCommit := flags.String("old", "", "旧 commit ID 或 ref（必填）")
-	newCommit := flags.String("new", "", "新 commit ID 或 ref（必填）")
-	outputType := flags.String("output", "simple", "输出格式: simple, text, json, summary, dot")
-	verbose := flags.Bool("verbose", false, "显示分析耗时")
+	repoPath := flags.String("repo", ".", "Go module directory inside a Git repository")
+	oldCommit := flags.String("old", "", "old commit ID or ref (required)")
+	newCommit := flags.String("new", "", "new commit ID or ref (required)")
+	outputType := flags.String("output", "simple", "output format: simple, text, json, summary, or dot")
+	verbose := flags.Bool("verbose", false, "show analysis duration")
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if *oldCommit == "" || *newCommit == "" {
-		_, _ = fmt.Fprintln(stderr, "错误: 必须指定 -old 和 -new 参数")
+		_, _ = fmt.Fprintln(stderr, "error: -old and -new are required")
 		flags.Usage()
 		return 1
 	}
 
 	cache, err := snapshot.DefaultCache()
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "初始化缓存失败: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "initialize cache: %v\n", err)
 		return 1
 	}
 
@@ -47,19 +63,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	analyzer := impact.NewAnalyzer(cache)
 	analysis, err := analyzer.AnalyzeDetailed(context.Background(), *repoPath, *oldCommit, *newCommit)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "分析失败: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "analyze impact: %v\n", err)
 		return 1
 	}
 
 	reporter := output.NewAnalysisReporter(stdout, analysis)
 	if err := reporter.Print(*outputType); err != nil {
-		_, _ = fmt.Fprintf(stderr, "输出失败: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "write output: %v\n", err)
 		return 1
 	}
 	if *verbose {
 		_, _ = fmt.Fprintf(
 			stderr,
-			"分析完成: %d 个受影响包，耗时 %s\n",
+			"analysis complete: %d affected packages in %s\n",
 			len(analysis.Packages),
 			time.Since(started),
 		)

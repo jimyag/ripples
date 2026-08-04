@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 func TestBinaryPrintsVersion(t *testing.T) {
@@ -41,8 +42,37 @@ func TestRunRequiresRevisions(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("run() code = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "必须指定 -old 和 -new") {
+	if !strings.Contains(stderr.String(), "error: -old and -new are required") {
 		t.Fatalf("run() stderr = %q", stderr.String())
+	}
+	assertNoChinese(t, stderr.String())
+}
+
+func TestRunHelpIsEnglishAndIncludesExamples(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-h"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(-h) code = %d, want 0", code)
+	}
+	want := []string{
+		"Usage: ripples -old <ref> -new <ref> [options]",
+		"ripples -repo . -old HEAD~1 -new HEAD",
+		"ripples -repo . -old origin/main -new HEAD -output dot > impact.dot",
+	}
+	for _, text := range want {
+		if !strings.Contains(stderr.String(), text) {
+			t.Errorf("run(-h) stderr does not contain %q:\n%s", text, stderr.String())
+		}
+	}
+	assertNoChinese(t, stderr.String())
+}
+
+func assertNoChinese(t *testing.T, text string) {
+	t.Helper()
+	for _, r := range text {
+		if unicode.Is(unicode.Han, r) {
+			t.Fatalf("output contains Chinese character %q: %q", r, text)
+		}
 	}
 }
 

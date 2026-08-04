@@ -48,6 +48,18 @@ func TestReporterJSONOnlyExposesPathAndName(t *testing.T) {
 	}
 }
 
+func TestReporterSummary(t *testing.T) {
+	var output bytes.Buffer
+	err := NewReporter(&output, reporterPackages).Print("summary")
+	if err != nil {
+		t.Fatalf("Print(summary) error = %v", err)
+	}
+	want := "Affected packages: 2\n- cmd/server.main\n- payment.payment\n"
+	if output.String() != want {
+		t.Fatalf("Print(summary) = %q, want %q", output.String(), want)
+	}
+}
+
 func TestReporterDOTPrintsReversePackageRelationships(t *testing.T) {
 	analysis := impact.Analysis{
 		Packages: []impact.Package{
@@ -97,14 +109,14 @@ func TestReporterDOTPrintsReversePackageRelationships(t *testing.T) {
 
 func TestReporterDOTRequiresDetailedAnalysis(t *testing.T) {
 	err := NewReporter(&bytes.Buffer{}, reporterPackages).Print("dot")
-	if err == nil {
-		t.Fatal("Print(dot) error = nil, want detailed analysis error")
+	if err == nil || err.Error() != "DOT output requires detailed analysis results" {
+		t.Fatalf("Print(dot) error = %v, want detailed analysis error", err)
 	}
 }
 
 func TestReporterRejectsUnknownFormat(t *testing.T) {
 	err := NewReporter(&bytes.Buffer{}, reporterPackages).Print("xml")
-	if err == nil {
-		t.Fatal("Print(xml) error = nil, want unsupported format error")
+	if err == nil || err.Error() != `unsupported output format "xml"` {
+		t.Fatalf("Print(xml) error = %v, want unsupported format error", err)
 	}
 }

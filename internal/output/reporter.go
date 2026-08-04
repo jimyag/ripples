@@ -44,7 +44,7 @@ func (r *Reporter) Print(format string) error {
 	case "dot":
 		return r.printDOT()
 	default:
-		return fmt.Errorf("不支持的输出格式 %q", format)
+		return fmt.Errorf("unsupported output format %q", format)
 	}
 }
 
@@ -75,7 +75,7 @@ func (r *Reporter) printJSON() error {
 }
 
 func (r *Reporter) printSummary() error {
-	if _, err := fmt.Fprintf(r.writer, "受影响的包: %d 个\n", len(r.results)); err != nil {
+	if _, err := fmt.Fprintf(r.writer, "Affected packages: %d\n", len(r.results)); err != nil {
 		return err
 	}
 	for _, pkg := range r.results {
@@ -88,7 +88,7 @@ func (r *Reporter) printSummary() error {
 
 func (r *Reporter) printDOT() error {
 	if r.analysis == nil {
-		return fmt.Errorf("DOT 输出需要完整的影响分析结果")
+		return fmt.Errorf("DOT output requires detailed analysis results")
 	}
 
 	packages := append([]impact.Package(nil), r.analysis.Packages...)
@@ -123,7 +123,7 @@ func (r *Reporter) printDOT() error {
 		to, toOK := nodes[edge.To]
 		if !fromOK || !toOK {
 			return fmt.Errorf(
-				"影响图关系引用未知 package: %s -> %s",
+				"impact graph edge references an unknown package: %s -> %s",
 				edge.From,
 				edge.To,
 			)
