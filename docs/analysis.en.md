@@ -2,7 +2,7 @@
 
 [简体中文](analysis.md) · [English](analysis.en.md)
 
-This document explains how ripples calculates impact, which Go usage patterns are covered, and which cases cannot be resolved reliably through static analysis. See [Installation and Usage](usage.en.md) for setup and CLI details.
+This document explains how ripples calculates impact, which Go usage patterns are covered, and which cases cannot be resolved reliably through static analysis. See [Architecture](architecture.en.md) for source structure and algorithm details, and [Installation and Usage](usage.en.md) for setup and CLI details.
 
 ## How It Works
 

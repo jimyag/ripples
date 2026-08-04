@@ -2,7 +2,7 @@
 
 [简体中文](analysis.md) · [English](analysis.en.md)
 
-本文说明 ripples 如何计算影响范围、当前覆盖哪些 Go 使用方式，以及静态分析无法可靠判断的边界。安装和 CLI 说明见[安装与使用](usage.md)。
+本文说明 ripples 如何计算影响范围、当前覆盖哪些 Go 使用方式，以及静态分析无法可靠判断的边界。源码结构和算法细节见[实现架构](architecture.md)，安装和 CLI 说明见[安装与使用](usage.md)。
 
 ## 工作方式
 

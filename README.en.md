@@ -99,6 +99,7 @@ A red border marks a package containing changed declarations. Arrows point to pa
 | --- | --- |
 | [Installation and Usage](docs/usage.en.md) | Installation, CLI options, output formats, DOT, and caching |
 | [Analysis](docs/analysis.en.md) | Analysis model, supported Go usage patterns, and explicit boundaries |
+| [Architecture](docs/architecture.en.md) | Revision snapshots, symbol graph, value flow, reverse propagation, cache, and concurrency |
 | [GitHub Actions](docs/ci.en.md) | Release download, checksum verification, caching, and downstream job mapping |
 
 ## Development

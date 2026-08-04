@@ -99,6 +99,7 @@ dot -Tsvg impact.dot -o impact.svg
 | --- | --- |
 | [安装与使用](docs/usage.md) | 安装方式、CLI 参数、输出格式、DOT 和缓存 |
 | [分析能力](docs/analysis.md) | 分析原理、支持的 Go 使用方式和明确边界 |
+| [实现架构](docs/architecture.md) | revision 快照、声明图、值流、反向传播、缓存和并发实现 |
 | [GitHub Actions](docs/ci.md) | Release 下载、checksum、缓存和下游任务映射 |
 
 ## 开发
