@@ -21,20 +21,13 @@ flowchart LR
     Changed --> Walk["Breadth-first walk of dependents"]
     Reverse --> Walk
     Walk --> Packages["Deduplicate and sort packages"]
-    Packages --> Output["simple / JSON / summary / DOT"]
 ```
 
-The entry point is [`main.go`](../main.go). The CLI creates the persistent cache and an `impact.Analyzer`, calls `AnalyzeDetailed`, and delegates formatting to [`internal/output/reporter.go`](../internal/output/reporter.go).
+The entry point is [`main.go`](../main.go). The main algorithm is `AnalyzeDetailed` in [`internal/impact/analyzer.go`](../internal/impact/analyzer.go).
 
 ## 1. Revisions and Isolated Snapshots
 
-[`internal/snapshot/source.go`](../internal/snapshot/source.go) turns user input into immutable analysis sources:
-
-1. `Resolve` uses `git rev-parse --verify` to resolve both the commit and tree.
-2. It records the module directory relative to the Git root and rejects paths outside the repository.
-3. `OpenRevision` creates a detached worktree under a temporary directory without switching or modifying the user's working tree.
-4. The worktree preserves the complete repository-relative layout, so same-repository local `replace` targets remain available.
-5. `Source.Close` removes the worktree and temporary directory, and cleanup failures are returned to the caller.
+In [`internal/snapshot/source.go`](../internal/snapshot/source.go), `Resolve` uses `git rev-parse --verify` to resolve the commit and tree and records the module directory relative to the Git root. `OpenRevision` creates a temporary detached worktree while preserving the repository layout, so same-repository local `replace` targets remain valid. `Source.Close` removes the worktree and returns cleanup failures to the caller.
 
 Old and new revisions can be resolved and loaded concurrently. Git worktree metadata operations are serialized by a mutex keyed by Git root, preventing concurrent `worktree add/remove` calls in the same repository from interfering with each other. If old and new resolve to the same Git tree, ripples builds only one package snapshot.
 
@@ -48,12 +41,7 @@ The core data structures are defined in [`internal/impact/snapshot.go`](../inter
 | `Package` | Package path, name, content hash, and imports |
 | `Symbol` | Stable declaration ID, semantic hash, package path, and dependency IDs |
 
-`buildPackageSnapshot` loads `./...` through `golang.org/x/tools/go/packages`. It requests files, ASTs, types, type information, imports, module metadata, embed files, and other compiler inputs needed by the current build, but does not request `NeedDeps`. As a result:
-
-- Every local package in the current module has full AST and type information.
-- Standard-library and third-party packages remain type/import contracts; their function bodies are not traversed.
-- `GOOS`, `GOARCH`, build tags, CGo, and the current Go toolchain decide which compiled files enter the analysis.
-- `_test.go` files do not enter this package graph by default.
+`buildPackageSnapshot` loads `./...` through `golang.org/x/tools/go/packages`, requesting local ASTs, type information, imports, module metadata, embed files, and other compiler inputs without `NeedDeps`. Standard-library and third-party packages therefore remain type/import contracts whose function bodies are not traversed. The current Go toolchain, `GOOS`, `GOARCH`, build tags, and CGo configuration select the compiled files; `_test.go` files are not loaded by default.
 
 The parser retains comments for compiler directives and `go:embed`, while skipping legacy parser object resolution. After type checking, maps in `types.Info` that are no longer needed are cleared to reduce memory retained during snapshot construction.
 
@@ -64,11 +52,7 @@ The declaration graph is implemented primarily in [`internal/impact/symbol.go`](
 ```text
 example.com/app/payment::func::Charge
 example.com/app/payment::method::Service.Pay
-example.com/app/payment::type::Config
 example.com/app/payment::field::Config.Client
-example.com/app/payment::interface-method::Store.Save
-example.com/app/payment::var::DefaultClient
-example.com/app/payment::const::RetryLimit
 example.com/app/payment::init::payment/init.go::0
 ```
 
@@ -76,13 +60,11 @@ Regular identities contain the package path, declaration kind, and name. Methods
 
 ### Semantic Hashes
 
-- Go declarations are hashed through `ast.Fprint`.
-- Source positions, ordinary comments, and parser-internal object links are filtered out, so formatting-only changes and edits to ordinary comments do not change declaration hashes.
-- Constants are hashed from their complete type and exact value.
-- Struct fields and interface methods are separate symbols, preventing one member change from contaminating every user of the enclosing type.
-- CGo preambles and build-affecting `//go:` directives are normalized and added by [`internal/impact/buildmeta.go`](../internal/impact/buildmeta.go).
-- Files matched by `go:embed` become independent content-hash symbols in [`internal/impact/embed.go`](../internal/impact/embed.go) and are connected to their variables.
-- Package hashes also include compiled files, embed/other files, and imports to detect package-local content changes. Reordering declarations or moving them across files may still include the changed package itself, but does not invent cross-package declaration dependencies.
+- Regular declarations are hashed through `ast.Fprint`, filtering source positions, ordinary comments, and parser-internal object links; constants use their complete type and exact value.
+- Struct fields and interface methods are separate symbols, so a member change does not automatically contaminate every user of the enclosing type.
+- [`internal/impact/buildmeta.go`](../internal/impact/buildmeta.go) adds CGo preambles and build-affecting `//go:` directives to the hash.
+- [`internal/impact/embed.go`](../internal/impact/embed.go) creates content-hash symbols for `go:embed` files and connects them to their variables.
+- Package hashes include compiled files, embed/other files, and imports. Reordering declarations or moving them across files may include the changed package itself, but does not create nonexistent cross-package declaration edges.
 
 ### Declaration Dependencies
 
@@ -92,33 +74,19 @@ Base dependencies come from `types.Info.Uses`: objects referenced by a declarati
 2. Embed/build inputs: embedded files, CGo preambles, and compiler directives.
 3. Interfaces and function values: synthetic dispatch symbols produced by call sites, parameters, returns, fields, containers, and function-value propagation.
 
-Dependencies are stored as sorted ID sets so snapshots, cache entries, and output remain stable under concurrent execution.
+Dependencies are stored as sorted ID sets so snapshots and output remain stable.
 
 ## 4. Interface and Function-Value Precision
 
-Interface and value-flow behavior is centered on `valueFlowResolver` and `interfaceCallTracer` in [`internal/impact/symbol.go`](../internal/impact/symbol.go).
+Interface and value-flow behavior is centered on `valueFlowResolver` and `interfaceCallTracer` in [`internal/impact/symbol.go`](../internal/impact/symbol.go). The resolver follows assignments, parameters, returns, fields, and containers to identify candidate concrete types or functions; the tracer connects interface calls to those candidate implementations. See [Analysis](analysis.en.md) for the complete syntax coverage.
 
-The analyzer follows:
-
-- Concrete types held by interface parameters, returns, variables, and struct fields.
-- Factories, multiple returns, assignments, type assertions, and type switches.
-- Closures, named functions, function conversions, method values, and method expressions.
-- Slices, arrays, maps, channels, ranges, `append`, and statically known indexes or keys.
-- Generic forwarding, variadic arguments, `go`, and `defer` calls.
-
-The key constraint is that resolution is based on call sites and value flow. If an interface has multiple implementations, changing implementation A does not include callers of implementation B merely because both types satisfy the same interface. When one static storage location genuinely may hold multiple runtime values, every candidate is conservatively included.
-
-Resolution sets and stable candidate keys stop recursive functions, cyclic containers, and mutually recursive calls from creating infinite recursion. Third-party function bodies are not analyzed; when a local value is passed to a third-party interface, propagation follows only the visible interface method contract.
+Resolution is bounded by call sites and value flow, so two types implementing the same interface do not merge their callers. When one static location has multiple candidates, all are conservatively included. Resolution sets and candidate keys terminate recursive functions, cyclic containers, and mutually recursive calls; third-party calls use only the visible interface contract.
 
 ## 5. Module and Build-Configuration Changes
 
 The package snapshot first hashes `go.mod`, `go.sum`, `go.work`, and `go.work.sum` as a group. Only when this hash differs between old and new does [`internal/impact/module.go`](../internal/impact/module.go) build additional module snapshots.
 
-The module snapshot uses `NeedDeps`, but only to collect mappings from local packages to third-party module identities and checksum keys; it still does not parse third-party function bodies. It compares:
-
-- Effective global configuration such as module path, Go version, toolchain, and `godebug`.
-- Module paths, versions, and `replace` targets transitively used by each local package.
-- Checksum values for the same module/version key when that key exists in both revisions.
+The module snapshot uses `NeedDeps` only to map local packages to third-party module identities and checksum keys; it does not parse third-party function bodies. It compares effective Go/toolchain configuration, the module/version/`replace` values used by each local package, and checksums for module/version keys present in both revisions.
 
 Changed local packages are injected into the declaration graph through their package-init symbols and then use the same reverse-propagation algorithm. Adding or removing ordinary `go.sum` cache entries does not broaden the impact set.
 
@@ -126,17 +94,14 @@ Changed local packages are injected into the declaration graph through their pac
 
 The main algorithm is in [`internal/impact/analyzer.go`](../internal/impact/analyzer.go):
 
-1. `changedSymbols` takes the union of old and new symbol IDs.
-2. An ID present on only one side is added or removed; a differing hash is modified.
-3. Synthetic dispatch symbols are not direct change roots; they carry precision within propagation paths.
-4. `reverseDependencies` merges local declaration edges from old and new, reversing them from dependency to dependent.
-5. `transitiveDependents` performs one breadth-first traversal from all changed roots.
-6. The `affected` set deduplicates results and ensures that converging changes visit a declaration only once.
-7. Symbols are collapsed into packages and sorted by relative path, package name, and full path.
+1. `changedSymbols` compares old/new symbol IDs and hashes to find additions, removals, and modifications; synthetic dispatch symbols are not direct change roots.
+2. `reverseDependencies` merges old/new local declaration edges and reverses them from dependency to dependent.
+3. `transitiveDependents` performs one breadth-first traversal from all changed roots; the `affected` set deduplicates results and converging paths.
+4. Symbols are collapsed into packages and sorted by relative path, package name, and full path.
 
 Merging both graphs is what makes additions and removals correct: removals use call edges that still exist in the old graph, while additions use edges from the new graph. Reading only the current working tree or only one snapshot would lose relationships from the other side.
 
-`AnalyzeDetailed` also collapses declaration edges into package edges for DOT output. Edges internal to one package are not rendered in the package graph.
+`AnalyzeDetailed` also collapses declaration edges into cross-package edges used by DOT output.
 
 ## 7. Cache
 
@@ -147,12 +112,7 @@ package-snapshots/<key>.json
 module-snapshots/<key>.json
 ```
 
-Analysis keys contain:
-
-- The analysis format version and graph kind.
-- Git tree and module directory relative to the repository.
-- Go runtime version.
-- `GOOS`, `GOARCH`, `CGO_ENABLED`, `GOFLAGS`, and `GOEXPERIMENT`.
+Analysis keys contain the analysis format version, graph kind, Git tree, repository-relative module directory, Go runtime version, and `GOOS`, `GOARCH`, `CGO_ENABLED`, `GOFLAGS`, and `GOEXPERIMENT`.
 
 A cache hit avoids creating a worktree. A corrupt or unreadable entry falls back to rebuilding; a write failure is returned so the caller does not mistake an unpersisted result for a successful cache write. Entries are written to temporary files and atomically committed with rename.
 
@@ -160,28 +120,13 @@ Changes to the snapshot schema or analysis semantics must increment `analysisVer
 
 ## 8. Concurrency and Memory Boundaries
 
-[`internal/impact/concurrency.go`](../internal/impact/concurrency.go) implements `parallelFor` with at most `GOMAXPROCS` workers. Errors are stored by input index so concurrency does not change diagnostic ordering. It is used for:
-
-- Old/new revision resolution and module snapshot loading.
-- Package summary calculation.
-- Declaration hashing and base dependency calculation.
+[`internal/impact/concurrency.go`](../internal/impact/concurrency.go) implements `parallelFor` with at most `GOMAXPROCS` workers and stores errors by input index. It handles old/new revision and module snapshot loading, package summaries, declaration hashes, and base dependencies.
 
 Old and new package snapshots are also loaded concurrently. Each package and declaration is summarized once per snapshot. The propagation phase uses one shared `affected` set, so multiple changes converging on one declaration do not traverse that declaration repeatedly.
 
-Memory is bounded in three main ways: the primary package graph does not request third-party `NeedDeps`, unused `types.Info` maps are cleared after type checking, and completed snapshots persist package/symbol summaries rather than full ASTs. Snapshot construction still holds AST and required type information for the current module; this is the main memory cost of a cold analysis.
+Memory is bounded by omitting third-party `NeedDeps` from the primary package graph, clearing unused `types.Info` maps after type checking, and persisting snapshots without full ASTs. A cold analysis still holds the current module's AST and required type information.
 
-## 9. Output Layer
-
-[`internal/output/reporter.go`](../internal/output/reporter.go) does not calculate impact; it only consumes `Analysis`:
-
-- `simple`: one `<relative path>.<package name>` per line.
-- `json`: relative path and package name only.
-- `text` / `summary`: count and package list.
-- `dot`: a package-level reverse relationship graph generated through `github.com/emicklei/dot`.
-
-Mappings to binaries, services, labels, and deployment units remain outside the core analyzer and can be layered on the stable package output.
-
-## 10. Code and Test Map
+## 9. Code and Test Map
 
 | Concern | Implementation | Main tests |
 | --- | --- | --- |
@@ -195,5 +140,3 @@ Mappings to binaries, services, labels, and deployment units remain outside the 
 | Reverse propagation/package graph | [`internal/impact/analyzer.go`](../internal/impact/analyzer.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | Concurrent workers | [`internal/impact/concurrency.go`](../internal/impact/concurrency.go) | [`internal/impact/concurrency_test.go`](../internal/impact/concurrency_test.go) |
 | Output | [`internal/output/reporter.go`](../internal/output/reporter.go) | [`internal/output/reporter_test.go`](../internal/output/reporter_test.go) |
-
-When adding analysis behavior, answer three questions together: how the changed content forms a stable symbol hash, how the actual use forms a dependency edge, and how tests cover both old and new revisions.
