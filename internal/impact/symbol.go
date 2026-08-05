@@ -2456,6 +2456,7 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 	var declarations []symbolDeclaration
 	initIndex := 0
 	for fileIndex, file := range pkg.Syntax {
+		blankInitializerIndex := 0
 		filename := pkg.CompiledGoFiles[fileIndex]
 		relativeFilename, err := filepath.Rel(root, filename)
 		if err != nil {
@@ -2512,13 +2513,32 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 					case *ast.ValueSpec:
 						buildMetadataHash := declarationBuildMetadataHash(declaration.Doc, typedSpec.Doc, typedSpec.Comment)
 						for index, name := range typedSpec.Names {
+							valueNode := individualValueSpec(typedSpec, index)
+							if name.Name == "_" {
+								initializerIndex := blankInitializerIndex
+								blankInitializerIndex++
+								if declaration.Tok != token.VAR || !hasInitializationEffect(valueNode.Values) {
+									continue
+								}
+								declarations = append(declarations, symbolDeclaration{
+									id: blankInitializerID(
+										pkg.PkgPath,
+										filepath.ToSlash(relativeFilename),
+										initializerIndex,
+									),
+									node:              valueNode,
+									hashNode:          valueNode,
+									buildMetadataHash: buildMetadataHash,
+									pkg:               pkg,
+								})
+								continue
+							}
 							object := pkg.TypesInfo.Defs[name]
-							if object == nil || name.Name == "_" {
+							if object == nil {
 								continue
 							}
 							id := packageObjectID(pkg.PkgPath, objectKind(object), name.Name)
 							objectIDs[object] = id
-							valueNode := individualValueSpec(typedSpec, index)
 							symbol := symbolDeclaration{
 								id:                id,
 								node:              valueNode,
@@ -2587,6 +2607,14 @@ func receiverTypeName(receiver types.Type) string {
 
 func packageObjectID(packagePath, kind, name string) string {
 	return packagePath + "::" + kind + "::" + name
+}
+
+func blankInitializerID(packagePath, filename string, index int) string {
+	return blankInitializerPrefix(packagePath) + filename + "::" + strconv.Itoa(index)
+}
+
+func blankInitializerPrefix(packagePath string) string {
+	return packagePath + "::blank-initializer::"
 }
 
 func constantHash(constant *types.Const) string {
@@ -2688,8 +2716,9 @@ func addInitializationDependencies(loaded []*gopackages.Package, packages map[st
 		}
 		dependencies := make(map[string]struct{})
 		initPrefix := pkg.PkgPath + "::init::"
+		blankInitPrefix := blankInitializerPrefix(pkg.PkgPath)
 		for id := range symbols {
-			if strings.HasPrefix(id, initPrefix) {
+			if strings.HasPrefix(id, initPrefix) || strings.HasPrefix(id, blankInitPrefix) {
 				dependencies[id] = struct{}{}
 			}
 		}

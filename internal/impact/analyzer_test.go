@@ -997,6 +997,106 @@ func Unchanged() {}
 	})
 }
 
+func TestAnalyzeTracksEffectfulBlankInitializers(t *testing.T) {
+	tests := []struct {
+		name  string
+		suite string
+		want  []string
+	}{
+		{
+			name: "external registry callback",
+			suite: `package suite
+
+import (
+	"example.com/app/service"
+	"example.com/dependency"
+)
+
+var _ = dependency.Describe("suite", func() {
+	dependency.It("case", func() {
+		service.Changed()
+	})
+})
+`,
+			want: []string{
+				"service.service",
+				"suite.suite",
+			},
+		},
+		{
+			name: "immediately invoked function literal",
+			suite: `package suite
+
+import "example.com/app/service"
+
+var _ = func() bool {
+	service.Changed()
+	return true
+}()
+`,
+			want: []string{
+				"service.service",
+				"suite.suite",
+			},
+		},
+		{
+			name: "stored function literal",
+			suite: `package suite
+
+import "example.com/app/service"
+
+var _ = []func(){
+	func() { service.Changed() },
+}
+`,
+			want: []string{
+				"service.service",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			writeModuleFile(t, repo, "go.mod", `module example.com/app
+
+go 1.25
+
+require example.com/dependency v0.0.0
+
+replace example.com/dependency => ./dependency
+`)
+			writeModuleFile(t, repo, "dependency/go.mod", `module example.com/dependency
+
+go 1.25
+`)
+			writeModuleFile(t, repo, "dependency/dependency.go", `package dependency
+
+func Describe(_ string, _ func()) bool { return true }
+func It(_ string, _ func()) bool       { return true }
+`)
+			writeModuleFile(t, repo, "service/service.go", `package service
+
+func Changed() { println("old") }
+`)
+			writeModuleFile(t, repo, "suite/suite.go", test.suite)
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, "service/service.go", `package service
+
+func Changed() { println("new") }
+`)
+			newCommit := commitModule(t, repo, "new")
+
+			analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+			got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+			if err != nil {
+				t.Fatalf("Analyze() error = %v", err)
+			}
+			assertPackages(t, got, test.want)
+		})
+	}
+}
+
 func TestAnalyzePropagatesPackageInitializationForms(t *testing.T) {
 	tests := []struct {
 		name string
