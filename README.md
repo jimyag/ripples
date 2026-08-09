@@ -10,22 +10,22 @@
 </p>
 
 <p align="center">
-  <a href="#为什么需要-ripples">为什么需要</a> ·
-  <a href="#安装">安装</a> ·
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#影响关系图">关系图</a> ·
-  <a href="#文档">文档</a>
+  <a href="#why-ripples">Why ripples</a> ·
+  <a href="#installation">Installation</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#impact-graph">Impact Graph</a> ·
+  <a href="#documentation">Documentation</a>
 </p>
 
 <p align="center">
-  <strong>简体中文</strong> · <a href="./README.en.md">English</a>
+  <strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
 ---
 
-ripples 基于 Go AST、类型信息和声明依赖图，分析两个 Git revision 之间受直接或间接影响的 Go package。它关注代码是否实际引用了变更声明，而不是简单返回所有 import 变更 package 的调用方。
+ripples uses the Go AST, type information, and a declaration dependency graph to find Go packages that are directly or transitively affected between two Git revisions. It follows actual references to changed declarations instead of returning every package that imports a changed package.
 
-稳定输出是 `<module 内相对路径>.<package 名>`：
+The stable output is `<module-relative path>.<package name>`:
 
 ```text
 cmd/server.main
@@ -33,60 +33,60 @@ internal/order.order
 payment.payment
 ```
 
-## 为什么需要 ripples
+## Why ripples
 
-在包含多个服务的大型 Go 仓库中，一次公共 package 修改可能触发大量服务的测试、构建和部署检查。
+In a large Go repository with multiple services, a change to a shared package can trigger tests, builds, and deployment checks for many services.
 
-常见方案各有不足：
+Common approaches have different limitations:
 
-- `git diff` 只能找到直接修改的文件，无法判断间接受影响的调用方。
-- 基于 import graph 的分析只能精确到 package；只要 import 了发生变化的 package，就可能被判定为受影响。
-- 全量运行 CI 不需要预先判断影响范围，但会增加等待时间和计算成本。
+- `git diff` only finds directly changed files and cannot identify transitively affected callers.
+- Import-graph analysis works at package granularity; any package that imports the changed package may be considered affected.
+- Running the full CI pipeline avoids deciding the impact scope in advance, but increases wait time and compute cost.
 
-ripples 将分析精度下沉到声明级别：先识别发生变化的函数、方法、类型或变量，再沿实际引用关系向上传播，最终输出需要关注的 package。
+ripples analyzes changes at declaration granularity: it first identifies changed functions, methods, types, or variables, then propagates impact through actual references to produce the packages that need attention.
 
-CI 可以进一步把这些 package 映射为：
+CI workflows can map these packages to:
 
-- 需要运行的测试或构建任务
-- 受影响的 binary 和 service
+- Tests or build jobs to run
+- Affected binaries and services
 - PR labels
-- 需要部署或回归验证的组件
+- Components that need deployment or regression verification
 
-ripples 也可以生成影响关系图，展示变更如何沿 package 引用关系传播，辅助代码审查、变更解释和风险评估。
+ripples can also generate an impact graph that shows how a change propagates through package references, helping reviewers explain changes and assess their risk.
 
-## 核心能力
+## Core Capabilities
 
-- **声明级分析**：识别函数、方法、类型、字段、变量、常量和 `init` 的新增、删除与修改。
-- **直接与间接传播**：沿实际声明引用和调用关系反向查找受影响 package。
-- **接口实现解析**：根据调用点和值流定位具体实现，不混入同一接口的其他实现。
-- **Go 常见语法覆盖**：支持函数值、闭包、容器、类型断言、泛型、`go`、`defer` 和初始化关系。
-- **构建输入感知**：识别 build tags、CGo、`//go:` 指令、`go:embed`、`go.mod` 和 `go.work` 的有效变化。
-- **适合 CI**：稳定排序输出，支持持久缓存、JSON、摘要和 DOT 关系图。
+- **Declaration-level analysis**: detects added, removed, and modified functions, methods, types, fields, variables, constants, and `init` functions.
+- **Direct and transitive propagation**: walks actual declaration references and call relationships in reverse.
+- **Interface implementation resolution**: resolves concrete implementations from call sites and value flow without mixing unrelated implementations.
+- **Common Go syntax coverage**: follows function values, closures, containers, type assertions, generics, `go`, `defer`, and initialization relationships.
+- **Build input awareness**: detects effective changes to build tags, CGo, `//go:` directives, `go:embed`, `go.mod`, and `go.work`.
+- **CI-friendly output**: emits stable sorted results with persistent caching, JSON, summaries, and DOT graphs.
 
-完整覆盖范围和静态分析边界见[分析能力](docs/analysis.md)。
+See [Analysis](docs/analysis.en.md) for the complete coverage and static-analysis boundaries.
 
-## 安装
+## Installation
 
-使用 Go 安装最新版：
+Install the latest version with Go:
 
 ```bash
 go install github.com/jimyag/ripples@latest
 ripples --version
 ```
 
-也可以从 [GitHub Release](https://github.com/jimyag/ripples/releases/latest) 下载 Linux、macOS 和 Windows 的 amd64/arm64 原始二进制。
+You can also download raw amd64 and arm64 binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/jimyag/ripples/releases/latest).
 
-分析目标项目时仍需要 `git`、匹配项目的 Go toolchain，以及能够执行 `go list ./...` 的 Go module。平台二进制下载命令和完整运行要求见[安装与使用](docs/usage.md)。
+Analyzing a target project still requires `git`, a compatible Go toolchain, and a Go module where `go list ./...` succeeds. See [Installation and Usage](docs/usage.en.md) for platform download commands and complete runtime requirements.
 
-## 快速开始
+## Quick Start
 
-分析最近一次提交：
+Analyze the latest commit:
 
 ```bash
 ripples -repo . -old HEAD~1 -new HEAD
 ```
 
-示例输出：
+Example output:
 
 ```text
 cmd/server.main
@@ -94,47 +94,47 @@ internal/order.order
 payment.payment
 ```
 
-`-repo` 指向待分析的 Go module，可以是仓库根目录或 monorepo 中的 module 子目录。`-old` 和 `-new` 必须能够解析为 commit；ripples 分析已提交的 Git tree，不包含工作区中未提交的修改。
+`-repo` points to the Go module being analyzed and may be a repository root or a module subdirectory inside a monorepo. `-old` and `-new` must resolve to commits. ripples analyzes committed Git trees and does not include uncommitted working tree changes.
 
-参数、输出格式和缓存配置见[安装与使用](docs/usage.md)。
+See [Installation and Usage](docs/usage.en.md) for options, output formats, and cache configuration.
 
-## 影响关系图
+## Impact Graph
 
-使用 `dot` 输出 package 反向关系图，再通过 Graphviz 转换为 SVG：
+Emit a reverse package graph with `dot`, then convert it to SVG with Graphviz:
 
 ```bash
 ripples -repo . -old HEAD~1 -new HEAD -output dot > impact.dot
 dot -Tsvg impact.dot -o impact.svg
 ```
 
-红框表示包含变更声明的 package，箭头指向使用它的 package：
+A red border marks a package containing changed declarations. Arrows point to packages that use it:
 
-![ripples package 影响关系图示例](docs/impact-example.svg)
+![Example ripples package impact graph](docs/impact-example.svg)
 
-[查看 DOT 源文件](docs/impact-example.dot)
+[View the DOT source](docs/impact-example.dot)
 
-## 文档
+## Documentation
 
-| 文档 | 内容 |
+| Document | Contents |
 | --- | --- |
-| [安装与使用](docs/usage.md) | 安装方式、CLI 参数、输出格式、DOT 和缓存 |
-| [分析能力](docs/analysis.md) | 分析原理、支持的 Go 使用方式和明确边界 |
-| [实现架构](docs/architecture.md) | revision 快照、声明图、值流、反向传播、缓存和并发实现 |
-| [GitHub Actions](docs/ci.md) | Release 下载、checksum、缓存和下游任务映射 |
+| [Installation and Usage](docs/usage.en.md) | Installation, CLI options, output formats, DOT, and caching |
+| [Analysis](docs/analysis.en.md) | Analysis model, supported Go usage patterns, and explicit boundaries |
+| [Architecture](docs/architecture.en.md) | Revision snapshots, symbol graph, value flow, reverse propagation, cache, and concurrency |
+| [GitHub Actions](docs/ci.en.md) | Release download, checksum verification, caching, and downstream job mapping |
 
-## 开发
+## Development
 
 ```bash
 task deps
 task ci
 ```
 
-`task lint` 使用 golangci-lint 检查全部 Go package 和测试文件。常用任务可以通过 `task --list-all` 查看，本地构建结果位于 `bin/ripples`。
+`task lint` uses golangci-lint to check every Go package and test file. Run `task --list-all` for other common tasks. Local builds are written to `bin/ripples`.
 
-## 发布
+## Release
 
-推送 `v*` tag 后，Release workflow 会通过 GoReleaser 上传各平台原始二进制及 `checksums.txt`，不会打包为 tar 或 zip。发布前运行 `task release-snapshot` 验证配置和本地产物。
+Pushing a `v*` tag runs GoReleaser and uploads raw platform binaries plus `checksums.txt` without tar or zip archives. Run `task release-snapshot` before publishing to validate the configuration and local artifacts.
 
 ## License
 
-本项目基于 [GNU General Public License v3.0](LICENSE) 发布。
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
