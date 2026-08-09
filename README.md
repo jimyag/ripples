@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="#为什么需要-ripples">为什么需要</a> ·
   <a href="#安装">安装</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#影响关系图">关系图</a> ·
@@ -32,7 +33,26 @@ internal/order.order
 payment.payment
 ```
 
-binary、service、构建任务、label 和部署单元可以在 CI 中基于 package 输出继续映射。
+## 为什么需要 ripples
+
+在包含多个服务的大型 Go 仓库中，一次公共 package 修改可能触发大量服务的测试、构建和部署检查。
+
+常见方案各有不足：
+
+- `git diff` 只能找到直接修改的文件，无法判断间接受影响的调用方。
+- 基于 import graph 的分析只能精确到 package；只要 import 了发生变化的 package，就可能被判定为受影响。
+- 全量运行 CI 不需要预先判断影响范围，但会增加等待时间和计算成本。
+
+ripples 将分析精度下沉到声明级别：先识别发生变化的函数、方法、类型或变量，再沿实际引用关系向上传播，最终输出需要关注的 package。
+
+CI 可以进一步把这些 package 映射为：
+
+- 需要运行的测试或构建任务
+- 受影响的 binary 和 service
+- PR labels
+- 需要部署或回归验证的组件
+
+ripples 也可以生成影响关系图，展示变更如何沿 package 引用关系传播，辅助代码审查、变更解释和风险评估。
 
 ## 核心能力
 

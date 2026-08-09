@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="#why-ripples">Why ripples</a> ·
   <a href="#installation">Installation</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#impact-graph">Impact Graph</a> ·
@@ -32,7 +33,26 @@ internal/order.order
 payment.payment
 ```
 
-CI workflows can map package output to binaries, services, build jobs, labels, or deployment units.
+## Why ripples
+
+In a large Go repository with multiple services, a change to a shared package can trigger tests, builds, and deployment checks for many services.
+
+Common approaches have different limitations:
+
+- `git diff` only finds directly changed files and cannot identify transitively affected callers.
+- Import-graph analysis works at package granularity; any package that imports the changed package may be considered affected.
+- Running the full CI pipeline avoids deciding the impact scope in advance, but increases wait time and compute cost.
+
+ripples analyzes changes at declaration granularity: it first identifies changed functions, methods, types, or variables, then propagates impact through actual references to produce the packages that need attention.
+
+CI workflows can map these packages to:
+
+- Tests or build jobs to run
+- Affected binaries and services
+- PR labels
+- Components that need deployment or regression verification
+
+ripples can also generate an impact graph that shows how a change propagates through package references, helping reviewers explain changes and assess their risk.
 
 ## Core Capabilities
 
