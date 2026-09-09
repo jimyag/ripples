@@ -30,10 +30,74 @@
 | 函数值 | 参数、返回值、多返回值、闭包捕获、函数类型转换、方法值、方法表达式和指针间接赋值 |
 | 构造与容器 | struct 构造器字段、slice、array、map、channel、range、`append`、容器返回值和静态可确定的索引/key |
 | 调用语法 | 普通调用、`go`、`defer`、variadic 调用、泛型函数和泛型透传 |
-| 初始化 | package 变量初始化、多个变量声明、常量变化、`init` 新增/删除/修改和跨 package 初始化顺序 |
+| 初始化 | package 变量实际引用、有运行时副作用的命名及空白初始化、多个变量声明、常量变化、`init` 新增/删除/修改和跨 package 初始化顺序；类型转换不等同于函数调用，但保留可能 panic 的转换和转换参数中的运行时效果 |
 | 构建输入 | build tags、文件名构建约束、CGo preamble、`//go:` 指令、`go:embed` 和其他编译输入 |
 | Module/Workspace | `go.mod`、`go.sum`、`go.work`、`go.work.sum`、dependency 版本和 `replace` 的有效变化 |
 | 输出与复用 | simple、JSON、text、summary、DOT，以及按 Git tree 和构建配置复用的持久缓存 |
+
+### Package 初始化副作用判断
+
+ripples 使用有限且可解释的语法规则判断 package 初始化效果，不做函数纯度、完整值域或完整 panic 分析。命中下表中的运行时规则时，初始化器会保守地连接到 package-init；其他表达式只通过实际声明引用传播。
+
+| 语法 | 判断 | 依据 |
+| --- | --- | --- |
+| 显式 `init()` | 传播 | Go 在 package 初始化阶段执行 `init()`，导入方无法绕过 |
+| 导入本地 package | 传播其 package-init | 保留 Go 的跨 package 初始化顺序 |
+| 普通函数或 builtin 调用 | 传播 | ripples 不做函数纯度分析，调用可能修改状态、阻塞或 panic |
+| 仅创建函数字面量 | 不传播函数体 | 创建函数值不会执行函数体；变量被使用时仍通过声明引用传播 |
+| 立即执行函数字面量 | 传播 | 外层 `CallExpr` 会立即执行函数体 |
+| channel receive | 传播 | `<-ch` 会在初始化阶段接收并可能阻塞 |
+| 类型转换 | 默认不传播转换本身 | Go AST 同样使用 `CallExpr` 表示转换，但转换不是函数调用；转换参数仍继续检查 |
+| slice → 非空 array/array pointer | 传播 | slice 长度不足时会在运行时 panic |
+| 字面量、无调用的组合字面量和普通运算 | 不传播 | 表达式本身没有上述运行时效果；其中嵌套的调用或 receive 仍会被检查 |
+| 依赖运行时值才可能 panic 的其他表达式 | 不增加专门的 package-init 边 | 当前不推断索引越界、nil 解引用或运行时除零；仍保留其中的声明引用和嵌套效果 |
+
+例如，命名和空白变量中的真实调用都会传播。即使返回值没有被其他声明使用，调用仍会在导入 package 时执行：
+
+```go
+var Registry = sets.New("a", "b") // 保守地视为可能有副作用
+var _ = registerHandlers()         // 返回值被丢弃，但调用仍会执行
+var Ready = <-readyCh              // 初始化时接收，可能阻塞
+```
+
+创建函数值不会执行函数体，但立即调用会执行：
+
+```go
+var Handler = func() { registerHandlers() } // 不因函数体连接到 package-init
+var _ = func() bool {                       // 立即调用，连接到 package-init
+	registerHandlers()
+	return true
+}()
+```
+
+Go 使用同一个 `CallExpr` AST 节点表示函数调用和类型转换。ripples 使用 `types.Info` 区分两者，避免把没有运行时效果的编译期接口断言当成 package 初始化副作用：
+
+```go
+var _ API = (*Client)(nil) // 仅检查 *Client 是否实现 API，不影响导入方
+```
+
+判断为类型转换后仍会继续检查参数。转换参数中的真实调用仍会执行，因此需要传播：
+
+```go
+var _ = ID(load()) // load() 的变化影响所有导入方
+```
+
+slice 转换为 array 或 array pointer 时，如果 slice 长度小于 array 长度，Go 会在运行时 panic。这类转换本身属于初始化期运行时效果，同样需要传播：
+
+```go
+var data = []byte{1}
+var _ = [2]byte(data)    // package 初始化时 panic
+var _ = (*[2]byte)(data) // package 初始化时 panic
+```
+
+命名变量也会在 package 被导入时初始化。只要初始化器包含上述运行时效果，即使变量没有被引用，也会连接到 package-init；纯字面量等没有运行时效果且未被引用的变量不会扩大影响范围：
+
+```go
+var Version = "v1"          // 未被引用时不影响导入方
+var Ports = []int{80, 443}  // 没有嵌套运行时效果时不影响导入方
+```
+
+当前判断不是完整的 Go panic 分析。例如 `items[index]`、`*pointer` 和 `value/divisor` 是否 panic 取决于运行时值，ripples 目前不会仅因这些表达式扩大到所有导入方。它们引用的声明以及表达式内部的函数调用、channel receive 和上述 slice 转换仍会正常传播。
 
 ## 接口与函数值传播
 

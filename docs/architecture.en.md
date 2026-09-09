@@ -70,7 +70,7 @@ Regular identities contain the package path, declaration kind, and name. Methods
 
 Base dependencies come from `types.Info.Uses`: objects referenced by a declaration AST are converted to local symbol IDs. Three groups of Go semantics are then added:
 
-1. Package initialization: effectful global initializers, `init` functions, and local import initialization order.
+1. Package initialization: runtime-effectful named and blank variable initializers, `init` functions, and local import initialization order. Named variables are initialized when the package is imported even when their values are unused, so they may have runtime side effects. `types.Info` distinguishes function calls from conversions; conversion operands are still traversed, and slice conversions to non-empty arrays or array pointers retain initialization dependencies because they may panic at run time. This is a syntax-level effect model and does not infer every panic condition that depends on runtime values.
 2. Embed/build inputs: embedded files, CGo preambles, and compiler directives.
 3. Interfaces and function values: synthetic dispatch symbols produced by call sites, parameters, returns, fields, containers, and function-value propagation.
 

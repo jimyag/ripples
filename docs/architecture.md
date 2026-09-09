@@ -70,7 +70,7 @@ example.com/app/payment::init::payment/init.go::0
 
 基础依赖来自 `types.Info.Uses`：声明 AST 中引用的本地对象会转换成对应 symbol ID。随后补充三类 Go 语义关系：
 
-1. package 初始化：有执行效果的全局变量初始化、`init` 和本地 import 初始化顺序。
+1. package 初始化：有运行时副作用的命名及空白变量初始化、`init` 和本地 import 初始化顺序。命名变量即使没有被引用也会在导入 package 时初始化，因此可能产生运行时副作用。`types.Info` 用于区分函数调用和类型转换；转换参数仍继续遍历，slice 到非空 array 或 array pointer 的转换因可能在运行时 panic 而保留初始化依赖。该判断是语法级效果模型，不推断依赖运行时值的所有 panic 条件。
 2. embed/build 输入：嵌入文件、CGo preamble 和编译指令。
 3. 接口与函数值：调用点、参数、返回值、字段、容器和函数值传播形成的 synthetic dispatch symbol。
 
