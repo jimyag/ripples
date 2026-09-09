@@ -1102,6 +1102,7 @@ func TestAnalyzePropagatesPackageInitializationForms(t *testing.T) {
 		name string
 		old  string
 		new  string
+		want []string
 	}{
 		{
 			name: "direct init body",
@@ -1113,6 +1114,7 @@ func init() {}
 
 func init() { println("changed") }
 `,
+			want: []string{"cmd/server.main", "startup.startup"},
 		},
 		{
 			name: "added init",
@@ -1121,9 +1123,10 @@ func init() { println("changed") }
 
 func init() { println("added") }
 `,
+			want: []string{"cmd/server.main", "startup.startup"},
 		},
 		{
-			name: "effectful package variable",
+			name: "runtime-effectful named package variable",
 			old: `package startup
 
 func setup() string { return "old" }
@@ -1132,10 +1135,23 @@ var State = setup()
 `,
 			new: `package startup
 
-func setup() string { return "new" }
+func setup() string { panic("changed initializer") }
 
 var State = setup()
 `,
+			want: []string{"cmd/server.main", "startup.startup"},
+		},
+		{
+			name: "unused pure package variable",
+			old: `package startup
+
+var State = "old"
+`,
+			new: `package startup
+
+var State = "new"
+`,
+			want: []string{"startup.startup"},
 		},
 		{
 			name: "immediately invoked function literal",
@@ -1147,6 +1163,7 @@ var State = func() string { return "old" }()
 
 var State = func() string { return "new" }()
 `,
+			want: []string{"cmd/server.main", "startup.startup"},
 		},
 	}
 	for _, test := range tests {
@@ -1168,12 +1185,166 @@ func main() {}
 			if err != nil {
 				t.Fatalf("Analyze() error = %v", err)
 			}
+			assertPackages(t, got, test.want)
+		})
+	}
+}
+
+func TestAnalyzeIgnoresCompileTimeBlankInitializer(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "startup/startup.go", `package startup
+
+type API interface {
+	Run()
+}
+
+type Implementation struct{}
+
+func (Implementation) Run() {}
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import _ "example.com/app/startup"
+
+func main() {}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "startup/startup.go", `package startup
+
+type API interface {
+	Run()
+}
+
+type Implementation struct{}
+
+func (Implementation) Run() {}
+
+var _ API = (*Implementation)(nil)
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"startup.startup"})
+}
+
+func TestAnalyzePropagatesPotentiallyPanickingConversions(t *testing.T) {
+	tests := []struct {
+		name       string
+		oldConvert string
+		newConvert string
+	}{
+		{
+			name:       "slice to array",
+			oldConvert: "[1]byte(Data)",
+			newConvert: "[2]byte(Data)",
+		},
+		{
+			name:       "slice to array pointer",
+			oldConvert: "(*[1]byte)(Data)",
+			newConvert: "(*[2]byte)(Data)",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			writeModuleFile(t, repo, "startup/startup.go", "package startup\n\nvar Data = []byte{1}\nvar _ = "+test.oldConvert+"\n")
+			writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import _ "example.com/app/startup"
+
+func main() {}
+`)
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, "startup/startup.go", "package startup\n\nvar Data = []byte{1}\nvar _ = "+test.newConvert+"\n")
+			newCommit := commitModule(t, repo, "new")
+
+			analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+			got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+			if err != nil {
+				t.Fatalf("Analyze() error = %v", err)
+			}
 			assertPackages(t, got, []string{
 				"cmd/server.main",
 				"startup.startup",
 			})
 		})
 	}
+}
+
+func TestAnalyzePropagatesCallInsideConversion(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "startup/startup.go", `package startup
+
+type Value int
+
+func build() int { return 1 }
+
+var _ = Value(build())
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import _ "example.com/app/startup"
+
+func main() {}
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "startup/startup.go", `package startup
+
+type Value int
+
+func build() int { panic("changed initializer") }
+
+var _ = Value(build())
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"startup.startup",
+	})
+}
+
+func TestAnalyzePropagatesReferencedPackageVariable(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "startup/startup.go", `package startup
+
+func setup() string { return "old" }
+
+var State = setup()
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/startup"
+
+func main() { println(startup.State) }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "startup/startup.go", `package startup
+
+func setup() string { return "new" }
+
+var State = setup()
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(context.Background(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{
+		"cmd/server.main",
+		"startup.startup",
+	})
 }
 
 func TestAnalyzePropagatesEmbeddedFileChange(t *testing.T) {

@@ -2517,7 +2517,7 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 							if name.Name == "_" {
 								initializerIndex := blankInitializerIndex
 								blankInitializerIndex++
-								if declaration.Tok != token.VAR || !hasInitializationEffect(valueNode.Values) {
+								if declaration.Tok != token.VAR || !hasInitializationEffect(pkg.TypesInfo, valueNode.Values) {
 									continue
 								}
 								declarations = append(declarations, symbolDeclaration{
@@ -2735,7 +2735,7 @@ func addInitializationDependencies(loaded []*gopackages.Package, packages map[st
 				}
 				for _, rawSpec := range gen.Specs {
 					spec := rawSpec.(*ast.ValueSpec)
-					if !hasInitializationEffect(spec.Values) {
+					if !hasInitializationEffect(pkg.TypesInfo, spec.Values) {
 						continue
 					}
 					for _, name := range spec.Names {
@@ -2760,7 +2760,7 @@ func addInitializationDependencies(loaded []*gopackages.Package, packages map[st
 	}
 }
 
-func hasInitializationEffect(expressions []ast.Expr) bool {
+func hasInitializationEffect(info *types.Info, expressions []ast.Expr) bool {
 	hasEffect := false
 	for _, expression := range expressions {
 		ast.Inspect(expression, func(node ast.Node) bool {
@@ -2771,6 +2771,15 @@ func hasInitializationEffect(expressions []ast.Expr) bool {
 				// because its enclosing CallExpr is visited first.
 				return false
 			case *ast.CallExpr:
+				if info != nil {
+					if typeAndValue, ok := info.Types[typedNode.Fun]; ok && typeAndValue.IsType() {
+						if conversionMayPanic(info, typedNode) {
+							hasEffect = true
+							return false
+						}
+						return true
+					}
+				}
 				hasEffect = true
 				return false
 			case *ast.UnaryExpr:
@@ -2783,6 +2792,35 @@ func hasInitializationEffect(expressions []ast.Expr) bool {
 		})
 	}
 	return hasEffect
+}
+
+func conversionMayPanic(info *types.Info, call *ast.CallExpr) bool {
+	if info == nil || call == nil || len(call.Args) != 1 {
+		return false
+	}
+
+	source := types.Unalias(info.TypeOf(call.Args[0]))
+	if source == nil {
+		return false
+	}
+	if _, ok := source.Underlying().(*types.Slice); !ok {
+		return false
+	}
+
+	target := types.Unalias(info.TypeOf(call))
+	if target == nil {
+		return false
+	}
+	target = target.Underlying()
+	if pointer, ok := target.(*types.Pointer); ok {
+		target = types.Unalias(pointer.Elem())
+		if target == nil {
+			return false
+		}
+		target = target.Underlying()
+	}
+	array, ok := target.(*types.Array)
+	return ok && array.Len() > 0
 }
 
 func packageInitID(packagePath string) string {
