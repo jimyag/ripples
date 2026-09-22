@@ -385,6 +385,38 @@ func Pay() string { return "new" }
 	})
 }
 
+func TestAnalyzeGo126ModuleUsesChangedService(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.26\n")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "cmp"
+
+func Name() string { return cmp.Or("", "old") }
+`)
+	writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/service"
+
+func main() { _ = service.Name() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "service/service.go", `package service
+
+import "cmp"
+
+func Name() string { return cmp.Or("", "new") }
+`)
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	got, err := analyzer.Analyze(t.Context(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"cmd/server.main", "service.service"})
+}
+
 func TestAnalyzeDoesNotPropagateThroughUnrelatedDeclaration(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "shared/shared.go", `package shared

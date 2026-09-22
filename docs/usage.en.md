@@ -64,7 +64,7 @@ ripples also requires:
 - A Go toolchain, to load the target repository according to its `go.mod`, build constraints, and current environment.
 - A Go module directory passed through `-repo` where `go list ./...` succeeds.
 
-Even when using a prebuilt release binary, the target project still requires a compatible Go toolchain for analysis.
+Even when using a prebuilt release binary, the target project still requires a compatible Go toolchain for analysis. ripples also type-checks source using the Go version built into its binary, which must support the Go version declared by both revisions. Check the binary's `goVersion` with `ripples --version`, and update the release when the target project moves to a newer Go minor version. You do not need to build the release yourself.
 
 ## CLI
 

@@ -64,7 +64,7 @@ install -m 0755 "$download_dir/$asset" "$HOME/.local/bin/ripples"
 - Go toolchain，用于按照目标仓库的 `go.mod`、构建约束和当前环境加载 package。
 - `-repo` 指定的 Go module 目录可以执行 `go list ./...`。
 
-即使通过 Release 安装了预编译二进制，分析目标 Go 项目时仍需要匹配该项目的 Go toolchain。
+即使通过 Release 安装了预编译二进制，分析目标 Go 项目时仍需要匹配该项目的 Go toolchain。ripples 也会使用编译进二进制的 Go 版本检查源码类型；该版本必须支持待分析的两个 revision 声明的 Go 版本。可以用 `ripples --version` 查看二进制的 `goVersion`。目标项目升级 Go 次版本时，应更新 ripples Release，无需自行编译。
 
 ## CLI
 
