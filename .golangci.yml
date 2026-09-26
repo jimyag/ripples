@@ -40,6 +40,11 @@ linters:
         text: "G204:"
         linters:
           - gosec
+      # -prepare runs the command the user passes on purpose.
+      - path: internal/impact/snapshot\.go
+        text: "G204:"
+        linters:
+          - gosec
 
 formatters:
   enable:

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/jimmicro/version"
@@ -17,10 +19,14 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	// Cancel on Ctrl-C or CI job cancellation so temporary exports are removed.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("ripples", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
@@ -40,6 +46,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	oldCommit := flags.String("old", "", "old commit ID or ref (required)")
 	newCommit := flags.String("new", "", "new commit ID or ref (required)")
 	outputType := flags.String("output", "simple", "output format: simple, text, json, summary, or dot")
+	prepare := flags.String("prepare", "", "shell command run in each exported revision before analysis, such as \"go generate ./...\"")
 	verbose := flags.Bool("verbose", false, "show analysis duration")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -52,6 +59,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		flags.Usage()
 		return 1
 	}
+	if err := output.CheckFormat(*outputType); err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
 
 	cache, err := snapshot.DefaultCache()
 	if err != nil {
@@ -61,7 +72,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	started := time.Now()
 	analyzer := impact.NewAnalyzer(cache)
-	analysis, err := analyzer.AnalyzeDetailed(context.Background(), *repoPath, *oldCommit, *newCommit)
+	analyzer.Prepare = *prepare
+	analysis, err := analyzer.AnalyzeDetailed(ctx, *repoPath, *oldCommit, *newCommit)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "analyze impact: %v\n", err)
 		return 1
@@ -80,5 +92,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 			time.Since(started),
 		)
 	}
+	// The result is already complete; a failed cleanup only leaves old entries.
+	if err := cache.Prune(cacheMaxAge); err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: prune cache: %v\n", err)
+	}
 	return 0
 }
+
+// cacheMaxAge keeps snapshots that CI reads regularly, such as the main
+// branch, while dropping those of short-lived revisions.
+const cacheMaxAge = 7 * 24 * time.Hour

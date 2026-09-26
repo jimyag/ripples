@@ -9,13 +9,13 @@ This document explains how ripples calculates impact, which Go usage patterns ar
 Given old and new revisions in the same repository, ripples:
 
 1. Resolves each revision to a commit and Git tree without modifying the current working tree.
-2. Creates temporary detached worktrees for both trees while preserving the complete repository-relative directory layout.
-3. Loads local package ASTs and type information under the current Go build configuration.
+2. Exports both complete trees into temporary directories through a private index, preserving the repository-relative layout. No worktree is registered, no hook runs, and sparse-checkout settings do not apply.
+3. Loads local package ASTs and type information, including `_test.go` files, under the effective Go build configuration.
 4. Ignores comments and source positions while comparing the semantic content of functions, methods, types, variables, constants, embedded files, and other declarations.
 5. Merges the old and new declaration dependency graphs and walks reverse dependencies from each changed declaration.
 6. Sorts and prints `<module-relative path>.<package name>`.
 
-The package containing a changed declaration is always returned. Other packages are included only when their declarations reference or call affected content. Importing the same package alone is not enough.
+The package containing a changed declaration is always returned. Other packages are included only when their declarations reference affected content, convert an affected type to an interface, or instantiate a generic with it. Importing the same package alone is not enough.
 
 Added declarations use the new dependency graph, while removed declarations use the old graph. Both changes therefore propagate through relationships that exist in the relevant revision.
 
@@ -25,15 +25,16 @@ Added declarations use the new dependency graph, while removed declarations use 
 | --- | --- |
 | Declarations | Functions, methods, types, interface methods, struct fields, package variables, constants, and `init` |
 | Change types | Additions, removals, and modifications; removals use the old dependency graph and additions use the new graph |
-| Dependency propagation | Direct references, transitive references, function calls, method calls, and cross-package forwarding |
-| Interface calls | Interface parameters, returns, fields, type assertions, type switches, and concrete implementations that can be resolved at the call site |
-| Function values | Parameters, returns, multiple returns, closure captures, function conversions, method values, method expressions, and indirect pointer assignments |
-| Construction and containers | Constructor struct fields, slices, arrays, maps, channels, ranges, `append`, container returns, and statically known indexes or keys |
-| Call syntax | Regular calls, `go`, `defer`, variadic calls, generic functions, and generic forwarding |
+| Dependency propagation | Direct references, transitive references, function calls, method calls, and cross-package forwarding; fields and methods promoted through embedding also depend on the embedded fields on their path |
+| Tests | `_test.go` files, external test packages (reported as the package under test), and packages that contain only tests; `init` functions in test files do not affect importers |
+| Interfaces | A declaration that converts a concrete value to an interface depends on the type's contract: every method in its method set, its field layout, and the contracts of nested named types. Constructors, setters, functional options, registries, embedded interface fields, and external `any` parameters such as `fmt` and `encoding/json` are all handled at the conversion site |
+| Function values | Referencing a function (as an argument, field, container element, return value, method value, or method expression) is a dependency on it |
+| Generics | Generic functions and the methods and fields of generic types; a declaration that instantiates a generic depends on the contracts of its type arguments |
+| Field layout | Unkeyed struct literals depend on field order, types, and tags |
 | Initialization | Actual references to package variables, runtime-effectful named and blank initializers, multi-variable declarations, constant changes, added/removed/modified `init`, and cross-package initialization order; conversions are not function calls, but potentially panicking conversions and runtime effects in their operands are preserved |
-| Build inputs | Build tags, filename build constraints, CGo preambles, `//go:` directives, `go:embed`, and other compiler inputs |
-| Modules and workspaces | Effective changes to `go.mod`, `go.sum`, `go.work`, `go.work.sum`, dependency versions, and `replace` directives |
-| Output and reuse | simple, JSON, text, summary, DOT, and persistent snapshots keyed by Git tree and build configuration |
+| Build inputs | Build tags, filename build constraints, CGo preambles, `//go:` directives, `go:embed`, and non-Go sources such as assembly, C/C++, headers, and syso files |
+| Modules and workspaces | Effective changes to `go.mod`, `go.sum`, the effective `go.work` (including one in a parent directory), `go.work.sum`, dependency versions, and `replace` directives |
+| Output and reuse | simple, JSON, text, summary, DOT, and persistent snapshots keyed by Git tree and the effective build configuration |
 
 ### Package-Initialization Effect Classification
 
@@ -99,28 +100,44 @@ var Ports = []int{80, 443}  // Does not affect importers when it has no nested r
 
 This classification is not a complete Go panic analysis. Whether `items[index]`, `*pointer`, or `value/divisor` panics depends on runtime values, so ripples does not currently broaden the result to every importer solely because of these expressions. Their declaration references and any nested calls, channel receives, or slice conversions described above still propagate normally.
 
-## Interface and Function Value Propagation
+## Interfaces, Generics, and Function Values
 
-- Interface parameters and fields, variable assignments, factories and multiple returns, closures, generic forwarding, type assertions and type switches, method values, and method expressions participate in value-flow analysis.
-- Concrete implementations stored in slices, arrays, maps, channels, ranges, and `append` propagate when they can be resolved from AST and type information.
-- When one static location may hold multiple runtime values, every candidate is conservatively included.
-- When a local concrete value is passed to an external interface, propagation continues through the interface method contract, but third-party function bodies are not traversed.
+Once a concrete value becomes an interface, any method in its method set can run through dynamic dispatch, type assertions, or reflection wherever the interface value flows afterwards. ripples therefore does not track interface values. Instead, the declaration that performs the conversion depends on the type's contract:
 
-Interface implementation resolution is based on call sites and value flow. Changing one concrete implementation does not include other implementations and their callers merely because they satisfy the same interface.
+- The contract covers every method in the method set (including promoted methods), the field layout, and the contracts of local named types used in fields, elements, and type arguments.
+- Conversion sites come from the official `golang.org/x/tools/go/ssa` package. SSA makes every implicit conversion explicit as `MakeInterface`, covering assignments, call arguments, returns, composite literals, channel sends, map writes, and package variable initializers.
+- A declaration that instantiates a generic depends on the contracts of its type arguments, because the generic body calls their methods through the type parameters.
+- Function values are not tracked: referencing a function is a dependency on it.
+
+Impact lands on the declaration that performs the conversion, not on code that only calls through the interface. For example:
+
+```go
+// main injects FileStore into service. When FileStore.Save changes, main is
+// affected; service only calls s.store.Save() and its own code is unchanged.
+func main() { service.New(store.FileStore{}).Run() }
+```
+
+Compared with the earlier value-flow analysis, this is:
+
+- More conservative: a conversion site depends on every method of the type, even methods the interface does not declare, and referencing a function value counts even if it is never called.
+- More complete: setters, functional options, local registries, embedded interface fields, `fmt.Stringer`, `json.Marshaler`, and other dynamic calls all propagate, and analysis time grows linearly with the code.
+
+Conversion sites stay independent: when two binaries inject different implementations of the same interface, changing one implementation affects only the binary that injects it.
 
 ## Build and Module Changes
 
-- Analysis follows the current `GOOS`, `GOARCH`, and build tags. Run ripples separately for every build configuration that needs coverage.
+- Analysis follows the effective `GOOS`, `GOARCH`, and build tags, including settings written with `go env -w`. Run ripples separately for every build configuration that needs coverage.
 - CGo preambles and `//go:` compiler directives participate in semantic comparison. Declaration-level directives propagate through actual users; linker-level directives conservatively affect the package.
-- Effective `go.mod` and `go.work` build configuration changes affect the relevant build.
+- When non-Go sources such as assembly, C/C++, headers, or syso files change, declarations without a Go body (implemented in assembly) and declarations from cgo-processed files propagate to their callers.
+- Effective `go.mod` and `go.work` build configuration changes affect the relevant build. `go.work` is located the way the go command locates it and may live in a parent directory of `-repo`.
 - Dependency version or `replace` changes affect only local packages that transitively use the relevant module.
 - Adding or removing ordinary cache entries in `go.sum` or `go.work.sum` has no impact. A checksum change for the same module version propagates to actual users.
 
 ## Explicit Boundaries
 
-- `_test.go` files are not analyzed by default.
 - The standard library and third-party dependencies from `go.mod` are treated as black boxes; their function bodies are not traversed.
-- Temporary worktrees preserve same-repository local `replace` directories so nested modules load correctly. The declaration graph still covers only the module selected by `-repo`; modifying another local replacement module in the same commit does not yet propagate across modules.
-- Reflection, `unsafe`, plugins, runtime registration, and calls determined only by external configuration cannot be resolved completely from the Go AST. ripples does not invent call relationships without static evidence.
+- Temporary exports preserve same-repository local `replace` directories so nested modules load correctly. The declaration graph still covers only the module selected by `-repo`; modifying another local replacement module in the same commit does not yet propagate across modules.
+- Reflection on values converted to interfaces is covered by type contracts. `unsafe`, plugins, `//go:linkname`, and behavior determined only by external configuration cannot be derived from Go source.
+- Generated code that the repository does not commit must be generated in the export with `-prepare`; otherwise loading fails.
 - DOT relationship graphs contain package nodes only, not functions, fields, or other declarations.
 - Output represents Go package impact only. Consumers map packages to binaries, services, labels, or deployment units.

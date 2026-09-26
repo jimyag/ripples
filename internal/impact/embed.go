@@ -16,13 +16,12 @@ import (
 
 func addEmbedDependencies(
 	root string,
-	loaded []*gopackages.Package,
-	packages map[string]Package,
+	localPackages []*gopackages.Package,
 	objectIDs map[types.Object]string,
 	symbols map[string]Symbol,
 ) error {
-	for _, pkg := range loaded {
-		if _, local := packages[pkg.PkgPath]; !local || len(pkg.EmbedFiles) == 0 {
+	for _, pkg := range localPackages {
+		if len(pkg.EmbedFiles) == 0 {
 			continue
 		}
 		for fileIndex, file := range pkg.Syntax {
@@ -89,7 +88,7 @@ func matchingEmbedInputs(
 		id := packageObjectID(pkg.PkgPath, "embed-file", filepath.ToSlash(repositoryRelative))
 		symbols[id] = Symbol{
 			ID:          id,
-			PackagePath: pkg.PkgPath,
+			PackagePath: reportPath(pkg),
 			Hash:        hash,
 		}
 		dependencies = append(dependencies, id)

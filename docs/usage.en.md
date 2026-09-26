@@ -60,9 +60,9 @@ The binaries can also be downloaded manually:
 
 ripples also requires:
 
-- `git`, to resolve revisions and create temporary worktrees.
+- `git`, to resolve revisions and export trees into temporary directories through a private index. No worktree is registered and no repository hook runs.
 - A Go toolchain, to load the target repository according to its `go.mod`, build constraints, and current environment.
-- A Go module directory passed through `-repo` where `go list ./...` succeeds.
+- A Go module directory passed through `-repo` where `go list -test ./...` succeeds, so test files must compile too. Generate code that the repository does not commit with `-prepare`.
 
 Even when using a prebuilt release binary, the target project still requires a compatible Go toolchain for analysis. ripples also type-checks source using the Go version built into its binary, which must support the Go version declared by both revisions. Check the binary's `goVersion` with `ripples --version`, and update the release when the target project moves to a newer Go minor version. You do not need to build the release yourself.
 
@@ -91,6 +91,12 @@ ripples \
 
 `-old` and `-new` must resolve to commits. ripples analyzes committed Git trees and does not include uncommitted working tree changes.
 
+When the repository relies on generated code that it does not commit (protobuf, wire, mockgen, and so on), use `-prepare` to generate it in every exported revision first. The command runs in the exported module directory through `sh -c` (`cmd /C` on Windows), and a failure fails the analysis:
+
+```bash
+ripples -repo . -old origin/main -new HEAD -prepare 'go generate ./...'
+```
+
 ### Options
 
 | Option | Description | Default |
@@ -98,7 +104,8 @@ ripples \
 | `-repo` | Git repository and Go module root | `.` |
 | `-old` | Old commit ID or ref | required |
 | `-new` | New commit ID or ref | required |
-| `-output` | `simple`, `json`, `text`, `summary`, or `dot` | `simple` |
+| `-output` | `simple`, `json`, `text`, `summary`, or `dot`; validated before analysis | `simple` |
+| `-prepare` | Shell command run in each exported revision's module directory before analysis | empty |
 | `-verbose` | Print the affected package count and elapsed time to stderr | `false` |
 
 ## Output Formats
@@ -110,34 +117,39 @@ cmd/server.main
 payment.payment
 ```
 
-The `json` format:
+The package at the module root has the relative path `.`, for example `..main`; splitting at the last `.` yields the directory `.` and the package name `main`.
+
+The `json` format also contains the full import path, and packages deleted by the change carry `"deleted": true`:
 
 ```json
 [
   {
     "path": "cmd/server",
-    "name": "main"
+    "name": "main",
+    "import_path": "example.com/app/cmd/server"
   },
   {
-    "path": "payment",
-    "name": "payment"
+    "path": "legacy",
+    "name": "legacy",
+    "import_path": "example.com/app/legacy",
+    "deleted": true
   }
 ]
 ```
 
+Deleted packages cannot be built or tested, so `simple`, `text`, and `summary` omit them; their former users are still reported through the old dependency graph.
+
 The `text` and `summary` formats print a human-readable package count:
 
 ```text
-受影响的包: 2 个
+Affected packages: 2
 - cmd/server.main
 - payment.payment
 ```
 
-The human-readable label is currently emitted in Chinese. Use `simple` or `json` for language-neutral automation.
-
 ### DOT Graph
 
-The `dot` format emits the reverse package relationship subgraph for the current change. Edges point from a dependency to the package that uses it, and a red border marks packages containing changed declarations:
+The `dot` format emits the reverse package relationship subgraph for the current change. Edges point from a dependency to the package that uses it, a red border marks packages containing changed declarations, and a dashed border marks packages deleted by the change:
 
 ```bash
 ripples -repo . -old HEAD~1 -new HEAD -output dot > impact.dot
@@ -152,7 +164,7 @@ Generating DOT text does not require Graphviz. The `dot` command is only needed 
 
 ## Cache
 
-ripples builds content-addressed cache keys from the Git tree, analysis format version, Go toolchain, and build configuration. Repeated analyses of the same tree and configuration reuse the package snapshot.
+ripples builds content-addressed cache keys from the Git tree, analysis format version, Go toolchain, and effective build configuration. Repeated analyses of the same tree and configuration reuse the package snapshot. After every analysis, entries that have not been read or written for 7 days are removed; snapshots in regular use, such as the main branch, stay.
 
 The default location comes from Go's `os.UserCacheDir`:
 
@@ -175,9 +187,8 @@ Cache keys include:
 
 - Git tree
 - Go module path relative to the Git repository root
-- ripples analysis format version
-- Go toolchain version
-- `GOOS`, `GOARCH`, and `CGO_ENABLED`
-- `GOFLAGS` and `GOEXPERIMENT`
+- ripples analysis format version and the Go version ripples was built with (the `go/types` version)
+- Effective values reported by `go env`: `GOOS`, `GOARCH`, `CGO_ENABLED`, `GOFLAGS`, `GOEXPERIMENT`, `GOVERSION`, `GOTOOLCHAIN`, `GOWORK`, and architecture levels such as `GOAMD64`; both environment variables and settings written with `go env -w` count
+- The `-prepare` command
 
-A snapshot contains the Go AST and type analysis for the current build, CGo and compiler directives, `go:embed` file mappings, other compiler inputs, and the declaration dependency graph. When module or workspace files change, ripples also caches a lightweight third-party module dependency graph and propagates only to local packages that actually use the relevant module.
+A snapshot contains the declaration dependency graph for the current build, package content hashes, and the mapping from local packages to third-party modules. Module information and the declaration graph come from the same export, so both always describe one Git tree.

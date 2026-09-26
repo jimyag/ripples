@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +31,7 @@ func TestLoadSnapshotPairRunsConcurrently(t *testing.T) {
 	load := func(_ context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
 		started <- revision.Commit
 		<-release
-		return &PackageSnapshot{ModuleHash: revision.Commit}, nil
+		return &PackageSnapshot{Tree: revision.Commit}, nil
 	}
 
 	type result struct {
@@ -67,11 +68,11 @@ func TestLoadSnapshotPairRunsConcurrently(t *testing.T) {
 		if got.err != nil {
 			t.Fatalf("loadSnapshotPair() error = %v", got.err)
 		}
-		if got.old.ModuleHash != "old" || got.new.ModuleHash != "new" {
+		if got.old.Tree != "old" || got.new.Tree != "new" {
 			t.Fatalf(
-				"loadSnapshotPair() hashes = (%q, %q), want (old, new)",
-				got.old.ModuleHash,
-				got.new.ModuleHash,
+				"loadSnapshotPair() trees = (%q, %q), want (old, new)",
+				got.old.Tree,
+				got.new.Tree,
 			)
 		}
 	case <-time.After(time.Second):
@@ -122,14 +123,38 @@ func TestAnalysisCacheKeyIncludesRepositorySubdirectory(t *testing.T) {
 	first := analysisCacheKey("package-graph", &snapshot.Revision{
 		Tree:   "shared-tree",
 		Subdir: filepath.Join("src", "first"),
-	})
+	}, "config")
 	second := analysisCacheKey("package-graph", &snapshot.Revision{
 		Tree:   "shared-tree",
 		Subdir: filepath.Join("src", "second"),
-	})
+	}, "config")
 
 	if first == second {
 		t.Fatal("analysisCacheKey() reused a cache key for different repository subdirectories")
+	}
+}
+
+func TestBuildConfigurationReadsGoEnvFile(t *testing.T) {
+	// An empty variable lets the go command fall back to the GOENV file.
+	t.Setenv("GOFLAGS", "")
+	t.Setenv("GOENV", filepath.Join(t.TempDir(), "missing.env"))
+	defaultConfig, err := buildConfiguration(t.Context())
+	if err != nil {
+		t.Fatalf("buildConfiguration() error = %v", err)
+	}
+
+	goEnv := filepath.Join(t.TempDir(), "go.env")
+	if err := os.WriteFile(goEnv, []byte("GOFLAGS=-tags=integration\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOENV", goEnv)
+	taggedConfig, err := buildConfiguration(t.Context())
+	if err != nil {
+		t.Fatalf("buildConfiguration() error = %v", err)
+	}
+
+	if defaultConfig == taggedConfig {
+		t.Fatalf("buildConfiguration() ignored GOFLAGS from the go env file: %s", taggedConfig)
 	}
 }
 
@@ -214,7 +239,7 @@ func (Service) Run() { println("changed") }
 	if err != nil {
 		t.Fatalf("Analyze() error = %v", err)
 	}
-	assertPackages(t, got, []string{"cmd/server.main", "service.service"})
+	assertPackages(t, got, []string{"cmd/server.main", "factory.factory", "service.service"})
 }
 
 func TestTransitiveDependentsDeduplicatesConvergingChanges(t *testing.T) {
@@ -634,9 +659,9 @@ func (Service) Run() { println("new") }
 	if err != nil {
 		t.Fatalf("Analyze() error = %v", err)
 	}
+	// runner only calls through the interface; main performs the conversion.
 	assertPackages(t, got, []string{
 		"cmd/server.main",
-		"runner.runner",
 		"service.service",
 	})
 }
@@ -703,7 +728,6 @@ func Start() { runner.Run(Service{}) }
 	assertPackages(t, got, []string{
 		"cmd/first.main",
 		"first.first",
-		"runner.runner",
 	})
 }
 
@@ -778,7 +802,6 @@ func Start() { runner.Use(New) }
 	assertPackages(t, got, []string{
 		"cmd/first.main",
 		"first.first",
-		"runner.runner",
 	})
 }
 
@@ -900,11 +923,10 @@ func (Job) Run() { println("new") }
 	if err != nil {
 		t.Fatalf("Analyze() error = %v", err)
 	}
+	// orchestrator and worker only forward and call the interface value.
 	assertPackages(t, got, []string{
 		"cmd/server.main",
-		"orchestrator.orchestrator",
 		"service.service",
-		"worker.worker",
 	})
 }
 
@@ -1488,6 +1510,21 @@ func Value() string { return "replacement" }
 		"consumer.consumer",
 		"legacy.legacy",
 	})
+	if got[0].Deleted || !got[1].Deleted {
+		t.Fatalf("Deleted flags = (%v, %v), want (false, true)", got[0].Deleted, got[1].Deleted)
+	}
+}
+
+func TestAnalyzeReportsModuleRootPackageAsDot(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "app.go", "package app\n\nfunc Version() int { return 1 }\n")
+	writeModuleFile(t, repo, "app/app.go", "package app\n\nfunc Name() string { return \"app\" }\n")
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "app.go", "package app\n\nfunc Version() int { return 2 }\n")
+	writeModuleFile(t, repo, "app/app.go", "package app\n\nfunc Name() string { return \"new\" }\n")
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"..app", "app.app"})
 }
 
 func TestAnalyzeReturnsAddedPackage(t *testing.T) {
@@ -1642,6 +1679,72 @@ func Value() int { return int(C.value()) }
 	})
 }
 
+func TestAnalyzePropagatesAssemblyImplementationChange(t *testing.T) {
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+		t.Skip("assembly fixture covers amd64 and arm64")
+	}
+	assembly := map[string]func(op string) string{
+		"mathx/add_amd64.s": func(op string) string {
+			return "#include \"textflag.h\"\n\nTEXT ·Add(SB), NOSPLIT, $0-24\n" +
+				"\tMOVQ a+0(FP), AX\n\tMOVQ b+8(FP), BX\n\t" + op + "Q BX, AX\n\tMOVQ AX, ret+16(FP)\n\tRET\n"
+		},
+		"mathx/add_arm64.s": func(op string) string {
+			return "#include \"textflag.h\"\n\nTEXT ·Add(SB), NOSPLIT, $0-24\n" +
+				"\tMOVD a+0(FP), R0\n\tMOVD b+8(FP), R1\n\t" + op + " R1, R0, R0\n\tMOVD R0, ret+16(FP)\n\tRET\n"
+		},
+	}
+	repo := initModule(t)
+	writeModuleFile(t, repo, "mathx/add.go", "package mathx\n\n// Add is implemented in assembly.\nfunc Add(a, b int64) int64\n")
+	writeModuleFile(t, repo, "billing/billing.go", `package billing
+
+import "example.com/app/mathx"
+
+func Total(a, b int64) int64 { return mathx.Add(a, b) }
+`)
+	for name, source := range assembly {
+		writeModuleFile(t, repo, name, source("ADD"))
+	}
+	oldCommit := commitModule(t, repo, "old")
+	for name, source := range assembly {
+		writeModuleFile(t, repo, name, source("SUB"))
+	}
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"billing.billing", "mathx.mathx"})
+}
+
+func TestAnalyzePropagatesCgoSourceChange(t *testing.T) {
+	output, err := exec.Command("go", "env", "CGO_ENABLED").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(output)) != "1" {
+		t.Skip("cgo is disabled")
+	}
+
+	repo := initModule(t)
+	writeModuleFile(t, repo, "cmath/cmath.go", `package cmath
+
+// #include "twice.h"
+import "C"
+
+func Double(v int) int { return int(C.twice(C.int(v))) }
+`)
+	writeModuleFile(t, repo, "cmath/twice.h", "int twice(int v);\n")
+	writeModuleFile(t, repo, "cmath/twice.c", "#include \"twice.h\"\nint twice(int v) { return v * 2; }\n")
+	writeModuleFile(t, repo, "billing/billing.go", `package billing
+
+import "example.com/app/cmath"
+
+func Fee(v int) int { return cmath.Double(v) }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "cmath/twice.c", "#include \"twice.h\"\nint twice(int v) { return v * 3; }\n")
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"billing.billing", "cmath.cmath"})
+}
+
 func TestAnalyzeIgnoresNonSemanticGoModChange(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "payment/payment.go", `package payment
@@ -1776,6 +1879,128 @@ func main() {}
 		"cmd/server.main",
 		"service.service",
 	})
+}
+
+func TestAnalyzeIncludesTestFiles(t *testing.T) {
+	baseFiles := map[string]string{
+		"order/order.go":     "package order\n\nfunc Total(a, b int) int { return a + b }\n",
+		"pricing/pricing.go": "package pricing\n\nfunc Discount(v int) int { return v }\n",
+		"order/order_test.go": `package order
+
+import (
+	"testing"
+
+	"example.com/app/pricing"
+)
+
+func TestTotal(t *testing.T) {
+	if Total(1, 2) != pricing.Discount(3) {
+		t.Fatal("bad")
+	}
+}
+`,
+		"order/external_test.go": `package order_test
+
+import (
+	"testing"
+
+	"example.com/app/order"
+)
+
+func TestExternal(t *testing.T) { _ = order.Total(1, 1) }
+`,
+		"e2e/e2e_test.go": `package e2e
+
+import (
+	"testing"
+
+	"example.com/app/order"
+)
+
+func TestFlow(t *testing.T) { _ = order.Total(2, 2) }
+`,
+		"lib/lib.go":      "package lib\n\nfunc Value() int { return 1 }\n",
+		"lib/lib_test.go": "package lib\n\nfunc init() { println(\"old\") }\n",
+		"cmd/server/main.go": `package main
+
+import "example.com/app/lib"
+
+func main() { _ = lib.Value() }
+`,
+	}
+	tests := []struct {
+		name    string
+		changes map[string]string
+		want    []string
+	}{
+		{
+			name:    "test-only change",
+			changes: map[string]string{"order/order_test.go": strings.Replace(baseFiles["order/order_test.go"], "Discount(3)", "Discount(4)", 1)},
+			want:    []string{"order.order"},
+		},
+		{
+			name:    "declaration used only by tests",
+			changes: map[string]string{"pricing/pricing.go": "package pricing\n\nfunc Discount(v int) int { return v * 2 }\n"},
+			want:    []string{"order.order", "pricing.pricing"},
+		},
+		{
+			name:    "external test and test-only package",
+			changes: map[string]string{"order/order.go": "package order\n\nfunc Total(a, b int) int { return a - b }\n"},
+			want:    []string{"e2e.e2e", "order.order"},
+		},
+		{
+			name:    "test init does not affect importers",
+			changes: map[string]string{"lib/lib_test.go": "package lib\n\nfunc init() { println(\"new\") }\n"},
+			want:    []string{"lib.lib"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			for name, content := range baseFiles {
+				writeModuleFile(t, repo, name, content)
+			}
+			oldCommit := commitModule(t, repo, "old")
+			for name, content := range test.changes {
+				writeModuleFile(t, repo, name, content)
+			}
+			newCommit := commitModule(t, repo, "new")
+
+			assertAnalyzedPackages(t, repo, oldCommit, newCommit, test.want)
+		})
+	}
+}
+
+func TestAnalyzePropagatesParentGoWorkReplacement(t *testing.T) {
+	repo := initModule(t)
+	if err := os.Remove(filepath.Join(repo, "go.mod")); err != nil {
+		t.Fatal(err)
+	}
+	writeModuleFile(t, repo, "go.work", "go 1.25\n\nuse ./svc\n")
+	writeModuleFile(t, repo, "svc/go.mod", `module example.com/svc
+
+go 1.25
+
+require example.com/dep v0.0.0
+
+replace example.com/dep => ../dep1
+`)
+	for _, version := range []string{"1", "2"} {
+		writeModuleFile(t, repo, "dep"+version+"/go.mod", "module example.com/dep\n\ngo 1.25\n")
+		writeModuleFile(t, repo, "dep"+version+"/dep.go", "package dep\n\nfunc V() int { return "+version+" }\n")
+	}
+	writeModuleFile(t, repo, "svc/app/app.go", `package app
+
+import "example.com/dep"
+
+func Run() int { return dep.V() }
+`)
+	writeModuleFile(t, repo, "svc/other/other.go", "package other\n\nfunc X() int { return 1 }\n")
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "go.work", "go 1.25\n\nuse ./svc\n\nreplace example.com/dep => ./dep2\n")
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, filepath.Join(repo, "svc"), oldCommit, newCommit, []string{"app.app"})
 }
 
 func TestLoadSnapshotUsesPersistentCache(t *testing.T) {

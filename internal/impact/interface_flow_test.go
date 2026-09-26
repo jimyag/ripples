@@ -2,7 +2,10 @@ package impact
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jimyag/ripples/internal/snapshot"
 )
@@ -36,7 +39,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "factory returns package variable",
@@ -63,7 +66,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "factory returns concrete local",
@@ -89,7 +92,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "forwarded return",
@@ -238,7 +241,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "named return value",
@@ -264,7 +267,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "generic forwarding",
@@ -443,7 +446,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "runner.runner", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function returned from factory",
@@ -472,7 +475,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function stored in struct field",
@@ -510,7 +513,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function stored in slice",
@@ -537,7 +540,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function stored in map",
@@ -565,7 +568,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function sent through channel",
@@ -593,7 +596,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function appended and ranged",
@@ -623,7 +626,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function appended to struct field",
@@ -659,7 +662,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function in multiple return values",
@@ -687,7 +690,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function assigned through pointer",
@@ -716,7 +719,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "closure captures function parameter",
@@ -745,7 +748,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "constructor stores function field",
@@ -783,7 +786,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function returned inside slice",
@@ -810,7 +813,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function returned inside map",
@@ -837,7 +840,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function returned through channel",
@@ -866,7 +869,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function type conversion",
@@ -892,7 +895,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "bound receiver method value",
@@ -918,7 +921,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "stored method expression",
@@ -969,7 +972,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function called with defer",
@@ -992,7 +995,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "function received in select",
@@ -1024,7 +1027,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "variadic function callbacks",
@@ -1062,7 +1065,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "runner.runner", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "generic function callback",
@@ -1093,7 +1096,7 @@ func main() {
 }
 `,
 			},
-			want: []string{"cmd/server.main", "service.service"},
+			want: []string{"cmd/server.main", "factory.factory", "service.service"},
 		},
 		{
 			name: "type switch interface case",
@@ -1146,6 +1149,166 @@ func main() {
 			},
 			want: []string{"cmd/server.main", "service.service"},
 		},
+		{
+			name: "setter injection",
+			files: map[string]string{
+				"server/server.go": `package server
+
+import "example.com/app/runner"
+
+type Server struct{ current runner.Service }
+
+func (s *Server) Set(current runner.Service) { s.current = current }
+
+func (s *Server) Run() { s.current.Run() }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/server"
+	"example.com/app/service"
+)
+
+func main() {
+	current := &server.Server{}
+	current.Set(service.Service{})
+	current.Run()
+}
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "functional options",
+			files: map[string]string{
+				"server/server.go": `package server
+
+import "example.com/app/runner"
+
+type Server struct{ current runner.Service }
+
+type Option func(*Server)
+
+func WithService(current runner.Service) Option {
+	return func(s *Server) { s.current = current }
+}
+
+func New(options ...Option) *Server {
+	s := &Server{}
+	for _, option := range options {
+		option(s)
+	}
+	return s
+}
+
+func (s *Server) Run() { s.current.Run() }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/server"
+	"example.com/app/service"
+)
+
+func main() { server.New(server.WithService(service.Service{})).Run() }
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "embedded interface field",
+			files: map[string]string{
+				"holder/holder.go": `package holder
+
+import "example.com/app/runner"
+
+type Holder struct{ runner.Service }
+
+func New(current runner.Service) *Holder { return &Holder{Service: current} }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	"example.com/app/holder"
+	"example.com/app/service"
+)
+
+func main() { holder.New(service.Service{}).Run() }
+`,
+			},
+			want: []string{"cmd/server.main", "service.service"},
+		},
+		{
+			name: "local registry filled by blank import",
+			files: map[string]string{
+				"registry/registry.go": `package registry
+
+import "example.com/app/runner"
+
+var services = map[string]runner.Service{}
+
+func Register(name string, current runner.Service) { services[name] = current }
+
+func Get(name string) runner.Service { return services[name] }
+`,
+				"plugin/plugin.go": `package plugin
+
+import (
+	"example.com/app/registry"
+	"example.com/app/service"
+)
+
+func init() { registry.Register("default", service.Service{}) }
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	_ "example.com/app/plugin"
+	"example.com/app/registry"
+)
+
+func main() { registry.Get("default").Run() }
+`,
+			},
+			want: []string{"cmd/server.main", "plugin.plugin", "service.service"},
+		},
+		{
+			name: "local registry filled by package initializer",
+			files: map[string]string{
+				"registry/registry.go": `package registry
+
+import "example.com/app/runner"
+
+var services = map[string]runner.Service{}
+
+func Register(name string, current runner.Service) bool {
+	services[name] = current
+	return true
+}
+
+func Get(name string) runner.Service { return services[name] }
+`,
+				"plugin/plugin.go": `package plugin
+
+import (
+	"example.com/app/registry"
+	"example.com/app/service"
+)
+
+var _ = registry.Register("default", service.Service{})
+`,
+				"cmd/server/main.go": `package main
+
+import (
+	_ "example.com/app/plugin"
+	"example.com/app/registry"
+)
+
+func main() { registry.Get("default").Run() }
+`,
+			},
+			want: []string{"cmd/server.main", "plugin.plugin", "service.service"},
+		},
 	}
 
 	for _, test := range tests {
@@ -1180,7 +1343,9 @@ func (Service) Run() { println("new") }
 	}
 }
 
-func TestAnalyzeDoesNotPropagateUnusedConcreteInterfaceMethod(t *testing.T) {
+// A converted value may reach any method through type assertions or
+// reflection, so methods the interface does not declare still count.
+func TestAnalyzePropagatesUnusedMethodOfConvertedType(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "runner/runner.go", `package runner
 
@@ -1222,6 +1387,7 @@ func (Service) Unused() { println("new") }
 	newCommit := commitModule(t, repo, "new")
 
 	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"cmd/server.main",
 		"service.service",
 	})
 }
@@ -1352,121 +1518,7 @@ func Start() {
 	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
 		"cmd/server.main",
 		"feature.feature",
-		"runnera.runnera",
 		"servicea.servicea",
-	})
-}
-
-func TestAnalyzeDoesNotPropagateUnusedMethodThroughFactoryAndContainer(t *testing.T) {
-	repo := initModule(t)
-	writeModuleFile(t, repo, "runner/runner.go", `package runner
-
-type Service interface {
-	Used()
-	Unused()
-}
-`)
-	writeModuleFile(t, repo, "service/service.go", `package service
-
-type Service struct{}
-
-func (Service) Used() {}
-func (Service) Unused() { println("old") }
-`)
-	writeModuleFile(t, repo, "factory/factory.go", `package factory
-
-import (
-	"example.com/app/runner"
-	"example.com/app/service"
-)
-
-func New() runner.Service {
-	return service.Service{}
-}
-`)
-	writeModuleFile(t, repo, "cmd/server/main.go", `package main
-
-import (
-	"example.com/app/factory"
-	"example.com/app/runner"
-)
-
-func main() {
-	services := []runner.Service{factory.New()}
-	services[0].Used()
-}
-`)
-	oldCommit := commitModule(t, repo, "old")
-	writeModuleFile(t, repo, "service/service.go", `package service
-
-type Service struct{}
-
-func (Service) Used() {}
-func (Service) Unused() { println("new") }
-`)
-	newCommit := commitModule(t, repo, "new")
-
-	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
-		"service.service",
-	})
-}
-
-func TestAnalyzeDoesNotMixUnusedConstructorFieldBindings(t *testing.T) {
-	repo := initModule(t)
-	writeModuleFile(t, repo, "runner/runner.go", `package runner
-
-type Service interface {
-	Run()
-}
-`)
-	writeModuleFile(t, repo, "servicea/service.go", `package servicea
-
-type Service struct{}
-
-func (Service) Run() {}
-`)
-	writeModuleFile(t, repo, "serviceb/service.go", `package serviceb
-
-type Service struct{}
-
-func (Service) Run() { println("old") }
-`)
-	writeModuleFile(t, repo, "holder/holder.go", `package holder
-
-import "example.com/app/runner"
-
-type Holder struct {
-	Current runner.Service
-}
-
-func New(current runner.Service) Holder {
-	return Holder{Current: current}
-}
-`)
-	writeModuleFile(t, repo, "cmd/server/main.go", `package main
-
-import (
-	"example.com/app/holder"
-	"example.com/app/servicea"
-	"example.com/app/serviceb"
-)
-
-func main() {
-	holder.New(servicea.Service{}).Current.Run()
-	_ = holder.New(serviceb.Service{})
-}
-`)
-	oldCommit := commitModule(t, repo, "old")
-	writeModuleFile(t, repo, "serviceb/service.go", `package serviceb
-
-type Service struct{}
-
-func (Service) Run() { println("new") }
-`)
-	newCommit := commitModule(t, repo, "new")
-
-	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
-		"serviceb.serviceb",
 	})
 }
 
@@ -1698,63 +1750,6 @@ func (Service) Run() { println("new") }
 
 	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
 		"cmd/server.main",
-		"runner.runner",
-		"service.service",
-	})
-}
-
-func TestAnalyzeDoesNotPropagateUnusedMethodStoredInInterfaceField(t *testing.T) {
-	repo := initModule(t)
-	writeModuleFile(t, repo, "service/service.go", `package service
-
-type Service struct{}
-
-func (*Service) Used() {}
-func (*Service) Unused() { println("old") }
-`)
-	writeModuleFile(t, repo, "handler/handler.go", `package handler
-
-import "example.com/app/service"
-
-type Service interface {
-	Used()
-	Unused()
-}
-
-type Handler struct {
-	service Service
-}
-
-func New(service *service.Service) *Handler {
-	return &Handler{service: service}
-}
-
-func (h *Handler) Used() {
-	h.service.Used()
-}
-`)
-	writeModuleFile(t, repo, "cmd/server/main.go", `package main
-
-import (
-	"example.com/app/handler"
-	"example.com/app/service"
-)
-
-func main() {
-	handler.New(&service.Service{}).Used()
-}
-`)
-	oldCommit := commitModule(t, repo, "old")
-	writeModuleFile(t, repo, "service/service.go", `package service
-
-type Service struct{}
-
-func (*Service) Used() {}
-func (*Service) Unused() { println("new") }
-`)
-	newCommit := commitModule(t, repo, "new")
-
-	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
 		"service.service",
 	})
 }
@@ -1831,19 +1826,25 @@ func (Enterprise) Run() { println("new") }
 `)
 	newCommit := commitModule(t, repo, "new")
 
+	// factory.NewEnterprise converts Enterprise in every build; main only
+	// reaches it when the enterprise init assigns it.
 	t.Setenv("GOFLAGS", "")
 	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"factory.factory",
 		"service.service",
 	})
 
 	t.Setenv("GOFLAGS", "-tags=enterprise")
 	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
 		"cmd/server.main",
+		"factory.factory",
 		"service.service",
 	})
 }
 
-func TestAnalyzeDoesNotMixDifferentFunctionFields(t *testing.T) {
+// Referencing a function is a dependency whether or not the function value is
+// called later; ripples does not track function values through storage.
+func TestAnalyzeTreatsReferencedFunctionValuesAsDependencies(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "runner/runner.go", `package runner
 
@@ -1909,225 +1910,191 @@ func NewSecond() runner.Service { return Second{} }
 	newCommit := commitModule(t, repo, "new")
 
 	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
+		"cmd/server.main",
 		"service.service",
 	})
 }
 
-func TestAnalyzeDoesNotMixDifferentFunctionContainers(t *testing.T) {
+func TestAnalyzePropagatesGenericMethodThroughInstance(t *testing.T) {
 	repo := initModule(t)
-	writeModuleFile(t, repo, "runner/runner.go", `package runner
+	writeModuleFile(t, repo, "cache/cache.go", `package cache
 
-type Service interface {
-	Run()
+type Cache[K comparable, V any] struct{ items map[K]V }
+
+func New[K comparable, V any]() *Cache[K, V] { return &Cache[K, V]{items: map[K]V{}} }
+
+func (c *Cache[K, V]) Get(key K) (V, bool) {
+	value, ok := c.items[key]
+	return value, ok
 }
 `)
-	writeModuleFile(t, repo, "service/service.go", `package service
+	writeModuleFile(t, repo, "user/user.go", `package user
 
-import "example.com/app/runner"
+import "example.com/app/cache"
 
-type First struct{}
+var users = cache.New[string, int]()
 
-func (First) Run() {}
-
-type Second struct{}
-
-func (Second) Run() { println("old") }
-
-func NewFirst() runner.Service { return First{} }
-func NewSecond() runner.Service { return Second{} }
-`)
-	writeModuleFile(t, repo, "cmd/server/main.go", `package main
-
-import (
-	"example.com/app/runner"
-	"example.com/app/service"
-)
-
-func main() {
-	first := []func() runner.Service{service.NewFirst}
-	second := []func() runner.Service{service.NewSecond}
-	_ = second
-	first[0]().Run()
-}
+func Lookup(name string) (int, bool) { return users.Get(name) }
 `)
 	oldCommit := commitModule(t, repo, "old")
-	writeModuleFile(t, repo, "service/service.go", `package service
+	writeModuleFile(t, repo, "cache/cache.go", `package cache
 
-import "example.com/app/runner"
+type Cache[K comparable, V any] struct{ items map[K]V }
 
-type First struct{}
+func New[K comparable, V any]() *Cache[K, V] { return &Cache[K, V]{items: map[K]V{}} }
 
-func (First) Run() {}
-
-type Second struct{}
-
-func (Second) Run() { println("new") }
-
-func NewFirst() runner.Service { return First{} }
-func NewSecond() runner.Service { return Second{} }
-`)
-	newCommit := commitModule(t, repo, "new")
-
-	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
-		"service.service",
-	})
-}
-
-func TestAnalyzeKeepsFunctionStorageLocationsIndependent(t *testing.T) {
-	repo := initModule(t)
-	writeModuleFile(t, repo, "runner/runner.go", `package runner
-
-type Service interface {
-	Run()
-}
-`)
-	writeModuleFile(t, repo, "service/service.go", `package service
-
-import "example.com/app/runner"
-
-type First struct{}
-
-func (First) Run() {}
-
-type Second struct{}
-
-func (Second) Run() { println("old") }
-
-func NewFirst() runner.Service { return First{} }
-func NewSecond() runner.Service { return Second{} }
-`)
-	writeModuleFile(t, repo, "holder/holder.go", `package holder
-
-import "example.com/app/runner"
-
-type Holder struct {
-	Factory func() runner.Service
-}
-`)
-	writeModuleFile(t, repo, "cmd/slice/main.go", `package main
-
-import (
-	"example.com/app/runner"
-	"example.com/app/service"
-)
-
-func main() {
-	factories := []func() runner.Service{service.NewFirst, service.NewSecond}
-	factories[0]().Run()
-}
-`)
-	writeModuleFile(t, repo, "cmd/map/main.go", `package main
-
-import (
-	"example.com/app/runner"
-	"example.com/app/service"
-)
-
-func main() {
-	factories := make(map[string]func() runner.Service)
-	factories["first"] = service.NewFirst
-	factories["second"] = service.NewSecond
-	factories["first"]().Run()
-}
-`)
-	writeModuleFile(t, repo, "cmd/field/main.go", `package main
-
-import (
-	"example.com/app/holder"
-	"example.com/app/service"
-)
-
-func main() {
-	first := holder.Holder{Factory: service.NewFirst}
-	second := holder.Holder{Factory: service.NewSecond}
-	_ = second
-	first.Factory().Run()
-}
-`)
-	oldCommit := commitModule(t, repo, "old")
-	writeModuleFile(t, repo, "service/service.go", `package service
-
-import "example.com/app/runner"
-
-type First struct{}
-
-func (First) Run() {}
-
-type Second struct{}
-
-func (Second) Run() { println("new") }
-
-func NewFirst() runner.Service { return First{} }
-func NewSecond() runner.Service { return Second{} }
-`)
-	newCommit := commitModule(t, repo, "new")
-
-	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
-		"service.service",
-	})
-}
-
-func TestAnalyzeDoesNotMixFunctionsFromMultipleReturnValues(t *testing.T) {
-	repo := initModule(t)
-	writeModuleFile(t, repo, "runner/runner.go", `package runner
-
-type Service interface {
-	Run()
-}
-`)
-	writeModuleFile(t, repo, "service/service.go", `package service
-
-import "example.com/app/runner"
-
-type First struct{}
-
-func (First) Run() {}
-
-type Second struct{}
-
-func (Second) Run() { println("old") }
-
-func NewFirst() runner.Service { return First{} }
-func NewSecond() runner.Service { return Second{} }
-
-func Select() (func() runner.Service, func() runner.Service) {
-	return NewFirst, NewSecond
-}
-`)
-	writeModuleFile(t, repo, "cmd/server/main.go", `package main
-
-import "example.com/app/service"
-
-func main() {
-	first, _ := service.Select()
-	first().Run()
-}
-`)
-	oldCommit := commitModule(t, repo, "old")
-	writeModuleFile(t, repo, "service/service.go", `package service
-
-import "example.com/app/runner"
-
-type First struct{}
-
-func (First) Run() {}
-
-type Second struct{}
-
-func (Second) Run() { println("new") }
-
-func NewFirst() runner.Service { return First{} }
-func NewSecond() runner.Service { return Second{} }
-
-func Select() (func() runner.Service, func() runner.Service) {
-	return NewFirst, NewSecond
+func (c *Cache[K, V]) Get(key K) (V, bool) {
+	var zero V
+	return zero, false
 }
 `)
 	newCommit := commitModule(t, repo, "new")
 
-	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{
-		"service.service",
-	})
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"cache.cache", "user.user"})
+}
+
+func TestAnalyzePropagatesTypeParameterField(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "box/box.go", "package box\n\ntype Box[T any] struct{ Value T }\n")
+	writeModuleFile(t, repo, "app/app.go", `package app
+
+import "example.com/app/box"
+
+func Read(current box.Box[int]) int { return current.Value }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "box/box.go", "package box\n\ntype Box[T any] struct {\n\tValue T `json:\"value\"`\n}\n")
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"app.app", "box.box"})
+}
+
+func TestAnalyzePropagatesEmbeddedTypeBehindPromotedMethod(t *testing.T) {
+	repo := initModule(t)
+	shapes := func(embedded string) string {
+		return `package shapes
+
+type Base struct{}
+
+func (Base) Name() string { return "base" }
+
+type Fancy struct{}
+
+func (Fancy) Name() string { return "fancy" }
+
+type Widget struct{ ` + embedded + ` }
+`
+	}
+	writeModuleFile(t, repo, "shapes/shapes.go", shapes("Base"))
+	writeModuleFile(t, repo, "app/app.go", `package app
+
+import "example.com/app/shapes"
+
+func Label(current shapes.Widget) string { return current.Name() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "shapes/shapes.go", shapes("Fancy"))
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"app.app", "shapes.shapes"})
+}
+
+func TestAnalyzePropagatesFieldOrderToUnkeyedLiteral(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "geo/geo.go", "package geo\n\ntype Range struct {\n\tMin int\n\tMax int\n}\n")
+	writeModuleFile(t, repo, "quota/quota.go", `package quota
+
+import "example.com/app/geo"
+
+func Limits() geo.Range { return geo.Range{0, 100} }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "geo/geo.go", "package geo\n\ntype Range struct {\n\tMax int\n\tMin int\n}\n")
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"geo.geo", "quota.quota"})
+}
+
+func TestAnalyzePropagatesMethodsReachableThroughEmptyInterface(t *testing.T) {
+	model := func(methods string) string {
+		return `package model
+
+type User struct{ ID int }
+
+func New(id int) User { return User{ID: id} }
+` + methods
+	}
+	tests := []struct {
+		name    string
+		old     string
+		new     string
+		useSite string
+	}{
+		{
+			name:    "stringer",
+			old:     `func (u User) String() string { return "old" }`,
+			new:     `func (u User) String() string { return "new" }`,
+			useSite: `func Label() string { return fmt.Sprint(model.New(1)) }`,
+		},
+		{
+			name:    "added marshaler",
+			new:     "func (u User) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }",
+			useSite: `func Label() string { data, _ := json.Marshal(model.New(1)); return fmt.Sprint(data) }`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			writeModuleFile(t, repo, "model/model.go", model(test.old))
+			writeModuleFile(t, repo, "api/api.go", `package api
+
+import (
+	"encoding/json"
+	"fmt"
+
+	"example.com/app/model"
+)
+
+var _ = json.Marshal
+
+`+test.useSite+"\n")
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, "model/model.go", model(test.new))
+			newCommit := commitModule(t, repo, "new")
+
+			assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"api.api", "model.model"})
+		})
+	}
+}
+
+func TestAnalyzeCompletesDeepInterfaceCallChains(t *testing.T) {
+	const depth = 30
+	source := func(body string) string {
+		var text strings.Builder
+		text.WriteString("package chain\n\ntype Runner interface{ Run() }\n\ntype Impl struct{}\n\n")
+		fmt.Fprintf(&text, "func (Impl) Run() { %s }\n\nfunc Step0() Runner { return Impl{} }\n", body)
+		for index := 1; index <= depth; index++ {
+			fmt.Fprintf(&text, "\nfunc Step%d() Runner {\n\tfirst := Step%d()\n\tsecond := Step%d()\n", index, index-1, index-1)
+			text.WriteString("\tif first != nil {\n\t\treturn first\n\t}\n\treturn second\n}\n")
+		}
+		return text.String()
+	}
+	repo := initModule(t)
+	writeModuleFile(t, repo, "chain/chain.go", source(""))
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "chain/chain.go", source("println()"))
+	newCommit := commitModule(t, repo, "new")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{"chain.chain"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("analysis of a deep interface call chain did not finish within a minute")
+	}
 }
 
 func assertAnalyzedPackages(t *testing.T, repo, oldCommit, newCommit string, want []string) {

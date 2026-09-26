@@ -1,17 +1,20 @@
 package snapshot
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
-const cacheVersion = "v1"
+const cacheVersion = "v2"
 
-// Cache stores content-addressed JSON analysis artifacts.
+// Cache stores content-addressed, gzip-compressed JSON analysis artifacts.
 type Cache struct {
 	Dir string
 }
@@ -44,30 +47,72 @@ func Key(parts ...string) string {
 }
 
 // Load decodes a cached value. A missing entry is not an error.
-func (c *Cache) Load(namespace, key string, value any) (bool, error) {
-	data, err := os.ReadFile(c.filename(namespace, key))
+func (c *Cache) Load(namespace, key string, value any) (_ bool, returnErr error) {
+	file, err := os.Open(c.filename(namespace, key))
 	if os.IsNotExist(err) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("read cache entry: %w", err)
 	}
-	if err := json.Unmarshal(data, value); err != nil {
+	defer func() {
+		returnErr = errors.Join(returnErr, file.Close())
+	}()
+	reader, err := gzip.NewReader(file)
+	if err != nil {
 		return false, fmt.Errorf("decode cache entry: %w", err)
 	}
+	if err := json.NewDecoder(reader).Decode(value); err != nil {
+		return false, fmt.Errorf("decode cache entry: %w", err)
+	}
+	// The modification time records the last use for Prune. A read-only
+	// cache still serves hits; it just never refreshes them.
+	now := time.Now()
+	_ = os.Chtimes(c.filename(namespace, key), now, now)
 	return true, nil
 }
 
-// Store atomically writes a cached value.
+// Prune removes entries that no analysis has read or written for maxAge, so
+// snapshots of short-lived revisions do not accumulate forever.
+func (c *Cache) Prune(maxAge time.Duration) error {
+	cutoff := time.Now().Add(-maxAge)
+	namespaces, err := os.ReadDir(c.Dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read cache directory: %w", err)
+	}
+	var errs []error
+	for _, namespace := range namespaces {
+		if !namespace.IsDir() {
+			continue
+		}
+		dir := filepath.Join(c.Dir, namespace.Name())
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("read cache namespace: %w", err))
+			continue
+		}
+		for _, entry := range entries {
+			info, err := entry.Info()
+			if err != nil || !info.ModTime().Before(cutoff) {
+				continue
+			}
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("remove cache entry: %w", err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Store atomically writes a gzip-compressed cached value. Snapshots repeat
+// long declaration IDs, so compression shrinks them several times.
 func (c *Cache) Store(namespace, key string, value any) error {
 	dir := filepath.Join(c.Dir, namespace)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create cache directory: %w", err)
-	}
-
-	data, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("encode cache entry: %w", err)
 	}
 
 	file, err := os.CreateTemp(dir, "entry-*")
@@ -79,7 +124,12 @@ func (c *Cache) Store(namespace, key string, value any) error {
 		_ = os.Remove(tempName)
 	}()
 
-	if _, err := file.Write(data); err != nil {
+	compressed := gzip.NewWriter(file)
+	if err := json.NewEncoder(compressed).Encode(value); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("encode cache entry: %w", err)
+	}
+	if err := compressed.Close(); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("write cache entry: %w", err)
 	}
@@ -93,5 +143,5 @@ func (c *Cache) Store(namespace, key string, value any) error {
 }
 
 func (c *Cache) filename(namespace, key string) string {
-	return filepath.Join(c.Dir, namespace, key+".json")
+	return filepath.Join(c.Dir, namespace, key+".json.gz")
 }

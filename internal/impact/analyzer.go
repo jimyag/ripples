@@ -6,20 +6,23 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-const analysisVersion = "symbol-impact-v25"
+const analysisVersion = "symbol-impact-v26"
 
 // Analyzer computes declaration-level impact between two Git revisions.
 type Analyzer struct {
 	cache *snapshot.Cache
+	// Prepare is a shell command run in each exported tree before loading,
+	// for example to generate code that is not committed.
+	Prepare string
 }
 
 // Analysis contains affected packages and the reverse package relationships
@@ -54,26 +57,25 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 // AnalyzeDetailed returns affected packages together with the package-level
 // reverse dependency subgraph used to derive them.
 func (a *Analyzer) AnalyzeDetailed(ctx context.Context, repoPath, oldRef, newRef string) (Analysis, error) {
+	config, err := buildConfiguration(ctx)
+	if err != nil {
+		return Analysis{}, err
+	}
 	oldSnapshot, newSnapshot, err := loadSnapshotPair(
 		ctx,
 		repoPath,
 		oldRef,
 		newRef,
 		snapshot.Resolve,
-		a.loadResolvedSnapshot,
+		func(ctx context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
+			return a.loadResolvedSnapshot(ctx, revision, config)
+		},
 	)
 	if err != nil {
 		return Analysis{}, err
 	}
 
-	moduleChanges := make(map[string]struct{})
-	if oldSnapshot.ModuleHash != newSnapshot.ModuleHash {
-		oldModules, newModules, err := a.loadModuleSnapshotPair(ctx, repoPath, oldRef, newRef)
-		if err != nil {
-			return Analysis{}, err
-		}
-		moduleChanges = changedModulePackages(oldModules, newModules)
-	}
+	moduleChanges := changedModulePackages(&oldSnapshot.Modules, &newSnapshot.Modules)
 	changed := changedSymbols(oldSnapshot, newSnapshot, moduleChanges)
 	reverse := reverseDependencies(oldSnapshot, newSnapshot)
 	affectedSymbols := transitiveDependents(changed, reverse)
@@ -92,6 +94,7 @@ func (a *Analyzer) AnalyzeDetailed(ctx context.Context, repoPath, oldRef, newRef
 		pkg, ok := newSnapshot.Packages[path]
 		if !ok {
 			pkg = oldSnapshot.Packages[path]
+			pkg.Deleted = true
 		}
 		results = append(results, pkg)
 	}
@@ -179,20 +182,25 @@ func loadSnapshotPair(
 }
 
 // LoadSnapshot loads a package summary from cache or builds it from an
-// immutable detached Git worktree.
+// immutable export of the Git tree.
 func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (*PackageSnapshot, error) {
 	revision, err := snapshot.Resolve(ctx, repoPath, ref)
 	if err != nil {
 		return nil, err
 	}
-	return a.loadResolvedSnapshot(ctx, revision)
+	config, err := buildConfiguration(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return a.loadResolvedSnapshot(ctx, revision, config)
 }
 
 func (a *Analyzer) loadResolvedSnapshot(
 	ctx context.Context,
 	revision *snapshot.Revision,
+	config string,
 ) (_ *PackageSnapshot, returnErr error) {
-	key := analysisCacheKey("package-graph", revision)
+	key := analysisCacheKey("package-graph", revision, config, a.Prepare)
 	var result PackageSnapshot
 	if a.cache != nil {
 		hit, err := a.cache.Load("package-snapshots", key, &result)
@@ -210,7 +218,7 @@ func (a *Analyzer) loadResolvedSnapshot(
 		returnErr = errors.Join(returnErr, source.Close())
 	}()
 
-	result, err = buildPackageSnapshot(ctx, source)
+	result, err = buildPackageSnapshot(ctx, source, a.Prepare)
 	if err != nil {
 		return nil, err
 	}
@@ -222,45 +230,35 @@ func (a *Analyzer) loadResolvedSnapshot(
 	return &result, nil
 }
 
-func analysisCacheKey(kind string, revision *snapshot.Revision) string {
-	return snapshot.Key(
+// analysisCacheKey identifies a snapshot by the analysis version, the Git tree
+// and module directory, the go/types version and every setting that changes
+// how the tree is built or prepared.
+func analysisCacheKey(kind string, revision *snapshot.Revision, settings ...string) string {
+	return snapshot.Key(append([]string{
 		analysisVersion,
 		kind,
 		revision.Tree,
 		filepath.ToSlash(revision.Subdir),
 		runtime.Version(),
-		os.Getenv("GOOS"),
-		os.Getenv("GOARCH"),
-		os.Getenv("CGO_ENABLED"),
-		os.Getenv("GOFLAGS"),
-		os.Getenv("GOEXPERIMENT"),
-	)
+	}, settings...)...)
 }
 
-func (a *Analyzer) loadModuleSnapshotPair(
-	ctx context.Context,
-	repoPath, oldRef, newRef string,
-) (*moduleSnapshot, *moduleSnapshot, error) {
-	var oldSnapshot, newSnapshot *moduleSnapshot
-	if err := parallelFor(2, func(index int) error {
-		ref := oldRef
-		if index == 1 {
-			ref = newRef
-		}
-		loaded, err := a.loadModuleSnapshot(ctx, repoPath, ref)
-		if err != nil {
-			return err
-		}
-		if index == 0 {
-			oldSnapshot = loaded
-		} else {
-			newSnapshot = loaded
-		}
-		return nil
-	}); err != nil {
-		return nil, nil, fmt.Errorf("load module snapshots: %w", err)
+// buildConfiguration returns the effective go env settings that select files,
+// build tags and the toolchain, including values from the go env file and
+// defaults such as CGO_ENABLED. It runs outside any module; the tree's own
+// go.mod and go.work are covered by the tree hash.
+func buildConfiguration(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "go", "env", "-json",
+		"GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS", "GOEXPERIMENT", "GOVERSION",
+		"GOTOOLCHAIN", "GOWORK", "GO386", "GOAMD64", "GOARM", "GOARM64", "GOMIPS",
+		"GOMIPS64", "GOPPC64", "GORISCV64", "GOWASM",
+	)
+	cmd.Dir = os.TempDir()
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("read go env: %w", err)
 	}
-	return oldSnapshot, newSnapshot, nil
+	return string(output), nil
 }
 
 func changedSymbols(
@@ -277,9 +275,6 @@ func changedSymbols(
 	}
 
 	for id := range all {
-		if isDispatchSymbol(id) {
-			continue
-		}
 		oldSymbol, oldOK := oldSnapshot.Symbols[id]
 		newSymbol, newOK := newSnapshot.Symbols[id]
 		if !oldOK || !newOK || oldSymbol.Hash != newSymbol.Hash {
@@ -290,13 +285,6 @@ func changedSymbols(
 		changed[packageInitID(packagePath)] = struct{}{}
 	}
 	return changed
-}
-
-func isDispatchSymbol(id string) bool {
-	return strings.Contains(id, "::interface-trace::") ||
-		strings.Contains(id, "::interface-selection::") ||
-		strings.Contains(id, "::interface-field::") ||
-		strings.Contains(id, "::dependency-interface::")
 }
 
 func reverseDependencies(snapshots ...*PackageSnapshot) map[string]map[string]struct{} {

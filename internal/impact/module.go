@@ -5,68 +5,27 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"golang.org/x/mod/modfile"
 	gopackages "golang.org/x/tools/go/packages"
-
-	"github.com/jimyag/ripples/internal/snapshot"
 )
 
 type moduleSnapshot struct {
 	GlobalHash string                    `json:"global_hash"`
 	Packages   map[string]packageModules `json:"packages"`
 	Sums       map[string]string         `json:"sums,omitempty"`
-	Cached     bool                      `json:"-"`
 }
 
 type packageModules struct {
 	Modules []string `json:"modules,omitempty"`
 	SumKeys []string `json:"sum_keys,omitempty"`
-}
-
-func (a *Analyzer) loadModuleSnapshot(
-	ctx context.Context,
-	repoPath, ref string,
-) (_ *moduleSnapshot, returnErr error) {
-	revision, err := snapshot.Resolve(ctx, repoPath, ref)
-	if err != nil {
-		return nil, err
-	}
-	key := analysisCacheKey("module-graph", revision)
-	var result moduleSnapshot
-	if a.cache != nil {
-		hit, err := a.cache.Load("module-snapshots", key, &result)
-		if err == nil && hit {
-			result.Cached = true
-			return &result, nil
-		}
-	}
-
-	source, err := snapshot.OpenRevision(ctx, revision)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		returnErr = errors.Join(returnErr, source.Close())
-	}()
-
-	result, err = buildModuleSnapshot(ctx, source.Dir)
-	if err != nil {
-		return nil, err
-	}
-	if a.cache != nil {
-		if err := a.cache.Store("module-snapshots", key, result); err != nil {
-			return nil, err
-		}
-	}
-	return &result, nil
 }
 
 func buildModuleSnapshot(ctx context.Context, root string) (moduleSnapshot, error) {
@@ -85,11 +44,19 @@ func buildModuleSnapshot(ctx context.Context, root string) (moduleSnapshot, erro
 		return moduleSnapshot{}, err
 	}
 
-	globalHash, err := effectiveModuleConfigHash(root)
+	workFilename, err := goWorkFile(ctx, root)
 	if err != nil {
 		return moduleSnapshot{}, err
 	}
-	sums, err := moduleSums(root)
+	workFile, err := parseWorkFile(workFilename)
+	if err != nil {
+		return moduleSnapshot{}, err
+	}
+	globalHash, err := effectiveModuleConfigHash(root, workFile)
+	if err != nil {
+		return moduleSnapshot{}, err
+	}
+	sums, err := moduleSums(moduleSumFiles(root, workFilename, workFile))
 	if err != nil {
 		return moduleSnapshot{}, err
 	}
@@ -188,12 +155,43 @@ func addModuleSumKey(keys map[string]struct{}, path, version string) {
 	keys[key+"/go.mod"] = struct{}{}
 }
 
-func effectiveModuleConfigHash(root string) (string, error) {
-	moduleFile, err := parseModuleFile(filepath.Join(root, "go.mod"))
+// goWorkFile returns the go.work file the go command uses in dir. It may live
+// in a parent directory or come from GOWORK; "" means module mode.
+func goWorkFile(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "go", "env", "GOWORK")
+	cmd.Dir = dir
+	output, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("go env GOWORK: %w", err)
 	}
-	workFile, err := parseWorkFile(filepath.Join(root, "go.work"))
+	if filename := strings.TrimSpace(string(output)); filename != "off" {
+		return filename, nil
+	}
+	return "", nil
+}
+
+// moduleSumFiles lists the checksum files the go command consults: the
+// module's go.sum and, in workspace mode, go.work.sum and each used module's
+// go.sum.
+func moduleSumFiles(root, workFilename string, workFile *modfile.WorkFile) []string {
+	filenames := []string{filepath.Join(root, "go.sum")}
+	if workFile == nil {
+		return filenames
+	}
+	workDir := filepath.Dir(workFilename)
+	filenames = append(filenames, filepath.Join(workDir, "go.work.sum"))
+	for _, use := range workFile.Use {
+		dir := filepath.FromSlash(use.Path)
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(workDir, dir)
+		}
+		filenames = append(filenames, filepath.Join(dir, "go.sum"))
+	}
+	return filenames
+}
+
+func effectiveModuleConfigHash(root string, workFile *modfile.WorkFile) (string, error) {
+	moduleFile, err := parseModuleFile(filepath.Join(root, "go.mod"))
 	if err != nil {
 		return "", err
 	}
@@ -282,10 +280,10 @@ func writeHashValue(writer io.Writer, key, value string) {
 	_, _ = io.WriteString(writer, "\x00")
 }
 
-func moduleSums(root string) (map[string]string, error) {
+func moduleSums(filenames []string) (map[string]string, error) {
 	result := make(map[string]string)
-	for _, name := range []string{"go.sum", "go.work.sum"} {
-		filename := filepath.Join(root, name)
+	for _, filename := range filenames {
+		name := filepath.Base(filename)
 		file, err := os.Open(filename)
 		if os.IsNotExist(err) {
 			continue

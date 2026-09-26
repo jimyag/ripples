@@ -1,13 +1,10 @@
 package impact
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
-
-	"github.com/jimyag/ripples/internal/snapshot"
 )
 
 func TestChangedModulePackages(t *testing.T) {
@@ -124,7 +121,11 @@ func TestModuleSums(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := moduleSums(root)
+	got, err := moduleSums([]string{
+		filepath.Join(root, "go.sum"),
+		filepath.Join(root, "go.work.sum"),
+		filepath.Join(root, "missing", "go.sum"),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,27 +136,5 @@ func TestModuleSums(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("moduleSums() = %v, want %v", got, want)
-	}
-}
-
-func TestLoadModuleSnapshotUsesPersistentCache(t *testing.T) {
-	repo := initModule(t)
-	writeModuleFile(t, repo, "service/service.go", "package service\n")
-	commitModule(t, repo, "initial")
-
-	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
-	first, err := analyzer.loadModuleSnapshot(context.Background(), repo, "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Cached {
-		t.Fatal("loadModuleSnapshot(first).Cached = true, want false")
-	}
-	second, err := analyzer.loadModuleSnapshot(context.Background(), repo, "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !second.Cached {
-		t.Fatal("loadModuleSnapshot(second).Cached = false, want true")
 	}
 }

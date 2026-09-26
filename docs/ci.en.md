@@ -86,7 +86,8 @@ jobs:
 - `fetch-depth: 0` ensures that the base commit is available on the runner.
 - `checksums.txt` verifies the downloaded release binary.
 - `RIPPLES_CACHE` must be an absolute path. The example uses the runner's temporary directory and restores it through `actions/cache`.
-- The `simple` output contains one `<relative path>.<package name>` per line, which can be mapped to binaries, services, labels, or test jobs with `grep -Fxq`.
+- The `simple` output contains one `<relative path>.<package name>` per line, which can be mapped to binaries, services, labels, or test jobs with `grep -Fxq`. `_test.go` files are analyzed, so a pull request that only changes tests still reports its package; deleted packages never appear in `simple` output.
+- When the repository relies on generated code that it does not commit, add `-prepare 'go generate ./...'` or the matching generator command to the analysis step, and install the generators on the runner.
 - The example always downloads the latest release. For a fully reproducible pipeline, pin the release tag and checksum in repository configuration.
 
 See [Installation and Usage](usage.en.md) for CLI and cache details, and [Analysis](analysis.en.md) for impact semantics.

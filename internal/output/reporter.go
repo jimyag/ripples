@@ -32,24 +32,48 @@ func NewAnalysisReporter(writer io.Writer, analysis impact.Analysis) *Reporter {
 	}
 }
 
-// Print writes the requested output format.
-func (r *Reporter) Print(format string) error {
+// CheckFormat reports whether format is a supported output format, so the CLI
+// can reject a typo before running the analysis.
+func CheckFormat(format string) error {
 	switch format {
-	case "simple":
-		return r.printSimple()
-	case "json":
-		return r.printJSON()
-	case "text", "summary":
-		return r.printSummary()
-	case "dot":
-		return r.printDOT()
+	case "simple", "json", "text", "summary", "dot":
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", format)
 	}
 }
 
-func (r *Reporter) printSimple() error {
+// Print writes the requested output format.
+func (r *Reporter) Print(format string) error {
+	if err := CheckFormat(format); err != nil {
+		return err
+	}
+	switch format {
+	case "simple":
+		return r.printSimple()
+	case "json":
+		return r.printJSON()
+	case "dot":
+		return r.printDOT()
+	default:
+		return r.printSummary()
+	}
+}
+
+// existingPackages drops packages deleted by the change: they are reported in
+// JSON and DOT but cannot be built or tested.
+func (r *Reporter) existingPackages() []impact.Package {
+	var packages []impact.Package
 	for _, pkg := range r.results {
+		if !pkg.Deleted {
+			packages = append(packages, pkg)
+		}
+	}
+	return packages
+}
+
+func (r *Reporter) printSimple() error {
+	for _, pkg := range r.existingPackages() {
 		if _, err := fmt.Fprintln(r.writer, displayName(pkg)); err != nil {
 			return err
 		}
@@ -59,14 +83,18 @@ func (r *Reporter) printSimple() error {
 
 func (r *Reporter) printJSON() error {
 	type packageResult struct {
-		Path string `json:"path"`
-		Name string `json:"name"`
+		Path       string `json:"path"`
+		Name       string `json:"name"`
+		ImportPath string `json:"import_path"`
+		Deleted    bool   `json:"deleted,omitempty"`
 	}
 	results := make([]packageResult, 0, len(r.results))
 	for _, pkg := range r.results {
 		results = append(results, packageResult{
-			Path: pkg.RelativePath,
-			Name: pkg.Name,
+			Path:       pkg.RelativePath,
+			Name:       pkg.Name,
+			ImportPath: pkg.Path,
+			Deleted:    pkg.Deleted,
 		})
 	}
 	encoder := json.NewEncoder(r.writer)
@@ -75,10 +103,11 @@ func (r *Reporter) printJSON() error {
 }
 
 func (r *Reporter) printSummary() error {
-	if _, err := fmt.Fprintf(r.writer, "Affected packages: %d\n", len(r.results)); err != nil {
+	packages := r.existingPackages()
+	if _, err := fmt.Fprintf(r.writer, "Affected packages: %d\n", len(packages)); err != nil {
 		return err
 	}
-	for _, pkg := range r.results {
+	for _, pkg := range packages {
 		if _, err := fmt.Fprintf(r.writer, "- %s\n", displayName(pkg)); err != nil {
 			return err
 		}
@@ -108,6 +137,9 @@ func (r *Reporter) printDOT() error {
 		if _, ok := changed[pkg.Path]; ok {
 			node.Attr("color", "#cf222e")
 			node.Attr("penwidth", 2)
+		}
+		if pkg.Deleted {
+			node.Attr("style", "dashed")
 		}
 		nodes[pkg.Path] = node
 	}

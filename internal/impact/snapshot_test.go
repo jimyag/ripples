@@ -4,7 +4,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"go/types"
 	"os"
 	"path/filepath"
 	"sync"
@@ -141,30 +140,5 @@ var Value = 1
 	}
 	if len(file.Comments) != 1 {
 		t.Fatalf("parseAnalysisFile() comments = %d, want 1", len(file.Comments))
-	}
-}
-
-func TestTrimUnusedTypeInfoKeepsRequiredMaps(t *testing.T) {
-	info := &types.Info{
-		Types:        make(map[ast.Expr]types.TypeAndValue),
-		Instances:    make(map[*ast.Ident]types.Instance),
-		Defs:         make(map[*ast.Ident]types.Object),
-		Uses:         make(map[*ast.Ident]types.Object),
-		Implicits:    make(map[ast.Node]types.Object),
-		Selections:   make(map[*ast.SelectorExpr]*types.Selection),
-		Scopes:       make(map[ast.Node]*types.Scope),
-		InitOrder:    []*types.Initializer{},
-		FileVersions: make(map[*ast.File]string),
-	}
-
-	trimUnusedTypeInfo(info)
-
-	if info.Types == nil || info.Defs == nil || info.Uses == nil ||
-		info.Implicits == nil || info.Selections == nil {
-		t.Fatal("trimUnusedTypeInfo() removed required type information")
-	}
-	if info.Instances != nil || info.Scopes != nil ||
-		info.InitOrder != nil || info.FileVersions != nil {
-		t.Fatal("trimUnusedTypeInfo() retained unused type information")
 	}
 }

@@ -10,8 +10,9 @@ import (
 )
 
 var reporterPackages = []impact.Package{
-	{RelativePath: "cmd/server", Name: "main"},
-	{RelativePath: "payment", Name: "payment"},
+	{Path: "example.com/app/cmd/server", RelativePath: "cmd/server", Name: "main"},
+	{Path: "example.com/app/legacy", RelativePath: "legacy", Name: "legacy", Deleted: true},
+	{Path: "example.com/app/payment", RelativePath: "payment", Name: "payment"},
 }
 
 func TestReporterSimple(t *testing.T) {
@@ -26,7 +27,7 @@ func TestReporterSimple(t *testing.T) {
 	}
 }
 
-func TestReporterJSONOnlyExposesPathAndName(t *testing.T) {
+func TestReporterJSONMarksDeletedPackages(t *testing.T) {
 	var output bytes.Buffer
 	err := NewReporter(&output, reporterPackages).Print("json")
 	if err != nil {
@@ -35,11 +36,19 @@ func TestReporterJSONOnlyExposesPathAndName(t *testing.T) {
 	want := `[
   {
     "path": "cmd/server",
-    "name": "main"
+    "name": "main",
+    "import_path": "example.com/app/cmd/server"
+  },
+  {
+    "path": "legacy",
+    "name": "legacy",
+    "import_path": "example.com/app/legacy",
+    "deleted": true
   },
   {
     "path": "payment",
-    "name": "payment"
+    "name": "payment",
+    "import_path": "example.com/app/payment"
   }
 ]
 `
@@ -104,6 +113,17 @@ func TestReporterDOTPrintsReversePackageRelationships(t *testing.T) {
 	got := strings.ReplaceAll(output.String(), "\n\t\n", "\n\n")
 	if got != string(want) {
 		t.Fatalf("Print(dot) = %q, want %q", output.String(), want)
+	}
+}
+
+func TestReporterDOTDashesDeletedPackages(t *testing.T) {
+	analysis := impact.Analysis{Packages: reporterPackages}
+	var output bytes.Buffer
+	if err := NewAnalysisReporter(&output, analysis).Print("dot"); err != nil {
+		t.Fatalf("Print(dot) error = %v", err)
+	}
+	if !strings.Contains(output.String(), `label="legacy.legacy",shape="box",style="dashed"`) {
+		t.Fatalf("Print(dot) does not dash the deleted package:\n%s", output.String())
 	}
 }
 

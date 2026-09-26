@@ -60,9 +60,9 @@ install -m 0755 "$download_dir/$asset" "$HOME/.local/bin/ripples"
 
 运行时还需要：
 
-- `git`，用于解析 revision 和创建临时 worktree。
+- `git`，用于解析 revision，并通过私有 index 把 tree 导出到临时目录；不会注册 worktree、不会触发仓库 hook。
 - Go toolchain，用于按照目标仓库的 `go.mod`、构建约束和当前环境加载 package。
-- `-repo` 指定的 Go module 目录可以执行 `go list ./...`。
+- `-repo` 指定的 Go module 目录可以执行 `go list -test ./...`，也就是测试文件也需要能编译。仓库不提交的生成代码可以用 `-prepare` 生成。
 
 即使通过 Release 安装了预编译二进制，分析目标 Go 项目时仍需要匹配该项目的 Go toolchain。ripples 也会使用编译进二进制的 Go 版本检查源码类型；该版本必须支持待分析的两个 revision 声明的 Go 版本。可以用 `ripples --version` 查看二进制的 `goVersion`。目标项目升级 Go 次版本时，应更新 ripples Release，无需自行编译。
 
@@ -91,6 +91,12 @@ ripples \
 
 `-old` 和 `-new` 必须能够解析为 commit。ripples 分析的是已提交的 Git tree，不包含工作区中未提交的修改。
 
+仓库依赖不提交的生成代码（protobuf、wire、mockgen 等）时，用 `-prepare` 在每个导出的 revision 中先生成代码。命令在导出的 module 目录中通过 `sh -c`（Windows 为 `cmd /C`）执行，失败时分析失败：
+
+```bash
+ripples -repo . -old origin/main -new HEAD -prepare 'go generate ./...'
+```
+
 ### 参数
 
 | 参数 | 说明 | 默认值 |
@@ -98,7 +104,8 @@ ripples \
 | `-repo` | Git 仓库及 Go module 根目录 | `.` |
 | `-old` | 旧 commit ID 或 ref | 必填 |
 | `-new` | 新 commit ID 或 ref | 必填 |
-| `-output` | `simple`、`json`、`text`、`summary` 或 `dot` | `simple` |
+| `-output` | `simple`、`json`、`text`、`summary` 或 `dot`；在分析前校验 | `simple` |
+| `-prepare` | 分析前在每个导出 revision 的 module 目录中执行的 shell 命令 | 空 |
 | `-verbose` | 在 stderr 输出受影响 package 数量和耗时 | `false` |
 
 ## 输出格式
@@ -110,32 +117,39 @@ cmd/server.main
 payment.payment
 ```
 
-`json` 格式：
+module 根目录的 package 相对路径是 `.`，例如 `..main`；按最后一个 `.` 拆分即可得到目录 `.` 和 package 名 `main`。
+
+`json` 格式额外包含完整 import path；本次删除的 package 带 `"deleted": true`：
 
 ```json
 [
   {
     "path": "cmd/server",
-    "name": "main"
+    "name": "main",
+    "import_path": "example.com/app/cmd/server"
   },
   {
-    "path": "payment",
-    "name": "payment"
+    "path": "legacy",
+    "name": "legacy",
+    "import_path": "example.com/app/legacy",
+    "deleted": true
   }
 ]
 ```
 
+被删除的 package 无法构建或测试，`simple`、`text` 和 `summary` 不输出它们；它们的旧使用者仍会按 old 依赖图输出。
+
 `text` 和 `summary` 输出带数量的可读摘要：
 
 ```text
-受影响的包: 2 个
+Affected packages: 2
 - cmd/server.main
 - payment.payment
 ```
 
 ### DOT 关系图
 
-`dot` 输出本次影响的 package 反向关系子图。边从被依赖的 package 指向使用它的 package，红色边框表示包含变更声明的 package：
+`dot` 输出本次影响的 package 反向关系子图。边从被依赖的 package 指向使用它的 package，红色边框表示包含变更声明的 package，虚线边框表示本次删除的 package：
 
 ```bash
 ripples -repo . -old HEAD~1 -new HEAD -output dot > impact.dot
@@ -150,7 +164,7 @@ dot -Tsvg impact.dot -o impact.svg
 
 ## 缓存
 
-ripples 使用 Git tree、分析格式版本、Go toolchain 和构建配置生成内容寻址缓存键。相同 tree 和构建配置的重复分析可以直接复用 package snapshot。
+ripples 使用 Git tree、分析格式版本、Go toolchain 和实际生效的构建配置生成内容寻址缓存键。相同 tree 和构建配置的重复分析可以直接复用 package snapshot。每次分析结束后，会删除 7 天内没有被读写过的条目；持续被使用的 snapshot（例如 main 分支）会一直保留。
 
 默认目录来自 Go 的 `os.UserCacheDir`：
 
@@ -173,9 +187,8 @@ RIPPLES_CACHE=/absolute/path/to/cache ripples \
 
 - Git tree
 - Go module 在 Git 仓库中的相对目录
-- ripples 分析格式版本
-- Go toolchain 版本
-- `GOOS`、`GOARCH`、`CGO_ENABLED`
-- `GOFLAGS`、`GOEXPERIMENT`
+- ripples 分析格式版本和编译 ripples 的 Go 版本（`go/types` 版本）
+- `go env` 报告的实际生效值：`GOOS`、`GOARCH`、`CGO_ENABLED`、`GOFLAGS`、`GOEXPERIMENT`、`GOVERSION`、`GOTOOLCHAIN`、`GOWORK` 和 `GOAMD64` 等架构级别；环境变量和 `go env -w` 写入的设置都会生效
+- `-prepare` 命令
 
-snapshot 包含当前构建中的 Go AST、类型解析结果、CGo/编译指令、`go:embed` 文件映射、其他编译输入和声明依赖图。module/workspace 文件变化时，ripples 会额外缓存轻量的第三方 module 依赖图，只传播到实际使用相关 module 的本地 package。
+snapshot 包含当前构建中的声明依赖图、package 内容哈希，以及本地 package 到第三方 module 的依赖关系。module 信息和声明图来自同一次导出，保证两者描述同一个 Git tree。

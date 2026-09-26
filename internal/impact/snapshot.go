@@ -12,8 +12,11 @@ import (
 	"go/types"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -22,20 +25,21 @@ import (
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-// Package is the stable identity and dependency summary of a Go package.
+// Package is the stable identity and content hash of a Go package.
 type Package struct {
-	Path         string   `json:"path"`
-	Name         string   `json:"name"`
-	RelativePath string   `json:"relative_path"`
-	Hash         string   `json:"hash"`
-	Imports      []string `json:"imports,omitempty"`
+	Path         string `json:"path"`
+	Name         string `json:"name"`
+	RelativePath string `json:"relative_path"`
+	Hash         string `json:"hash"`
+	// Deleted marks an affected package that exists only in the old revision.
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 // PackageSnapshot is the cached package graph for one Git tree.
 type PackageSnapshot struct {
 	Tree       string             `json:"tree"`
 	ModulePath string             `json:"module_path"`
-	ModuleHash string             `json:"module_hash"`
+	Modules    moduleSnapshot     `json:"modules"`
 	Packages   map[string]Package `json:"packages"`
 	Symbols    map[string]Symbol  `json:"symbols"`
 	Cached     bool               `json:"-"`
@@ -49,7 +53,10 @@ type Symbol struct {
 	Dependencies []string `json:"dependencies,omitempty"`
 }
 
-func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (PackageSnapshot, error) {
+func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare string) (PackageSnapshot, error) {
+	if err := runPrepare(ctx, source.Dir, prepare); err != nil {
+		return PackageSnapshot{}, err
+	}
 	// ./... already makes every local package an initial package. Omitting
 	// NeedDeps keeps dependency function bodies as black boxes instead of
 	// retaining syntax and type information for the full transitive graph.
@@ -64,18 +71,20 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 			gopackages.NeedEmbedFiles |
 			gopackages.NeedSyntax |
 			gopackages.NeedTypes |
-			gopackages.NeedTypesInfo,
+			gopackages.NeedTypesInfo |
+			gopackages.NeedForTest,
+		// Test variants and external test packages are analyzed so test-only
+		// changes and declarations used by tests reach their packages.
+		Tests:     true,
 		ParseFile: parseAnalysisFile,
 	}
 	loaded, err := gopackages.Load(cfg, "./...")
 	if err != nil {
 		return PackageSnapshot{}, fmt.Errorf("load package graph: %w", err)
 	}
+	loaded = slices.DeleteFunc(loaded, isTestMain)
 	if len(loaded) == 0 {
 		return PackageSnapshot{}, fmt.Errorf("no Go packages found")
-	}
-	for _, pkg := range loaded {
-		trimUnusedTypeInfo(pkg.TypesInfo)
 	}
 
 	var packageErrors []string
@@ -94,10 +103,16 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 		return PackageSnapshot{}, fmt.Errorf("cannot determine module path")
 	}
 
+	// Module identities come from the same export, so the package graph and
+	// the module graph always describe one Git tree.
+	modules, err := buildModuleSnapshot(ctx, source.Dir)
+	if err != nil {
+		return PackageSnapshot{}, err
+	}
 	result := PackageSnapshot{
 		Tree:       source.Tree,
 		ModulePath: modulePath,
-		ModuleHash: moduleFilesHash(source.Dir),
+		Modules:    modules,
 		Packages:   make(map[string]Package, len(loaded)),
 		Symbols:    make(map[string]Symbol),
 	}
@@ -112,8 +127,23 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source) (Package
 	}); err != nil {
 		return PackageSnapshot{}, err
 	}
-	for _, pkg := range summaries {
-		result.Packages[pkg.Path] = pkg
+	// A package and its test variants are reported as one package whose
+	// hash covers every variant and whose name comes from the plain package.
+	variantHashes := make(map[string][]string)
+	ranks := make(map[string]int)
+	for index, pkg := range summaries {
+		variantHashes[pkg.Path] = append(variantHashes[pkg.Path], pkg.Hash)
+		rank := variantRank(loaded[index])
+		if best, ok := ranks[pkg.Path]; !ok || rank < best {
+			ranks[pkg.Path] = rank
+			result.Packages[pkg.Path] = pkg
+		}
+	}
+	for path, hashes := range variantHashes {
+		pkg := result.Packages[path]
+		slices.Sort(hashes)
+		pkg.Hash = stableMarkerHash(strings.Join(hashes, "\x00"))
+		result.Packages[path] = pkg
 	}
 	result.Symbols, err = summarizeSymbols(source.Dir, loaded, result.Packages)
 	if err != nil {
@@ -135,14 +165,50 @@ func parseAnalysisFile(
 	)
 }
 
-func trimUnusedTypeInfo(info *types.Info) {
-	if info == nil {
-		return
+// runPrepare runs the preparation command in the exported module directory,
+// for example to generate code that the repository does not commit.
+func runPrepare(ctx context.Context, dir, command string) error {
+	if command == "" {
+		return nil
 	}
-	info.Instances = nil
-	info.Scopes = nil
-	info.InitOrder = nil
-	info.FileVersions = nil
+	shell, flag := "sh", "-c"
+	if runtime.GOOS == "windows" {
+		shell, flag = "cmd", "/C"
+	}
+	cmd := exec.CommandContext(ctx, shell, flag, command)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("prepare %q: %w: %s", command, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// isTestMain reports the generated main package of a test binary.
+func isTestMain(pkg *gopackages.Package) bool {
+	return pkg.Name == "main" && pkg.ForTest == "" && strings.HasSuffix(pkg.ID, ".test")
+}
+
+// reportPath returns the package a loaded package is reported as: in-package
+// test variants and external test packages belong to the package under test,
+// while dependencies recompiled for a test keep their own path.
+func reportPath(pkg *gopackages.Package) string {
+	if pkg.ForTest != "" && strings.TrimSuffix(pkg.PkgPath, "_test") == pkg.ForTest {
+		return pkg.ForTest
+	}
+	return pkg.PkgPath
+}
+
+// variantRank orders the variants of one reported package so its name comes
+// from the plain package, then the in-package test variant.
+func variantRank(pkg *gopackages.Package) int {
+	switch {
+	case pkg.ForTest == "":
+		return 0
+	case pkg.PkgPath == pkg.ForTest:
+		return 1
+	default:
+		return 2
+	}
 }
 
 func summarizePackage(root, modulePath string, pkg *gopackages.Package) (Package, error) {
@@ -194,12 +260,12 @@ func summarizePackage(root, modulePath string, pkg *gopackages.Package) (Package
 		_, _ = hash.Write([]byte{0})
 	}
 
+	path := reportPath(pkg)
 	return Package{
-		Path:         pkg.PkgPath,
-		Name:         pkg.Name,
-		RelativePath: relativePackagePath(modulePath, pkg.PkgPath),
+		Path:         path,
+		Name:         strings.TrimSuffix(pkg.Name, "_test"),
+		RelativePath: relativePackagePath(modulePath, path),
 		Hash:         hex.EncodeToString(hash.Sum(nil)),
-		Imports:      imports,
 	}, nil
 }
 
@@ -276,24 +342,9 @@ func findModulePath(packages []*gopackages.Package) string {
 	return ""
 }
 
-func moduleFilesHash(root string) string {
-	hash := sha256.New()
-	for _, name := range []string{"go.mod", "go.sum", "go.work", "go.work.sum"} {
-		data, err := os.ReadFile(filepath.Join(root, name))
-		if err != nil {
-			continue
-		}
-		_, _ = io.WriteString(hash, name)
-		_, _ = hash.Write([]byte{0})
-		_, _ = hash.Write(data)
-		_, _ = hash.Write([]byte{0})
-	}
-	return hex.EncodeToString(hash.Sum(nil))
-}
-
 func relativePackagePath(modulePath, packagePath string) string {
 	if packagePath == modulePath {
-		return filepath.Base(modulePath)
+		return "."
 	}
 	if relative, ok := strings.CutPrefix(packagePath, modulePath+"/"); ok {
 		return relative

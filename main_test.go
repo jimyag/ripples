@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 )
 
@@ -38,7 +40,7 @@ func TestBinaryPrintsVersion(t *testing.T) {
 
 func TestRunRequiresRevisions(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run(nil, &stdout, &stderr)
+	code := run(t.Context(), nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run() code = %d, want 1", code)
 	}
@@ -50,7 +52,7 @@ func TestRunRequiresRevisions(t *testing.T) {
 
 func TestRunHelpIsEnglishAndIncludesExamples(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"-h"}, &stdout, &stderr)
+	code := run(t.Context(), []string{"-h"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run(-h) code = %d, want 0", code)
 	}
@@ -98,7 +100,7 @@ func Value() string { return "new" }
 
 	t.Setenv("RIPPLES_CACHE", t.TempDir())
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := run(t.Context(), []string{
 		"-repo", repo,
 		"-old", oldCommit,
 		"-new", newCommit,
@@ -152,7 +154,7 @@ func Value() string { return libs.Value() + "!" }
 
 	t.Setenv("RIPPLES_CACHE", t.TempDir())
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := run(t.Context(), []string{
 		"-repo", moduleDir,
 		"-old", oldCommit,
 		"-new", newCommit,
@@ -189,7 +191,7 @@ func Value() string { return "new" }
 
 	t.Setenv("RIPPLES_CACHE", t.TempDir())
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := run(t.Context(), []string{
 		"-repo", repo,
 		"-old", oldCommit,
 		"-new", newCommit,
@@ -205,6 +207,94 @@ func Value() string { return "new" }
 	n2->n1;` + "\n\t\n}\n"
 	if stdout.String() != want {
 		t.Fatalf("run() stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestRunRejectsUnknownOutputBeforeAnalysis(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run(t.Context(), []string{
+		"-repo", filepath.Join(t.TempDir(), "missing"),
+		"-old", "HEAD~1",
+		"-new", "HEAD",
+		"-output", "jsno",
+	}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), `unsupported output format "jsno"`) {
+		t.Fatalf("run() code = %d, stderr = %q; want output format error", code, stderr.String())
+	}
+}
+
+func TestRunPreparesExportedSourceBeforeAnalysis(t *testing.T) {
+	repo := initCLIRepository(t)
+	writeCLIFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")
+	writeCLIFile(t, repo, ".gitignore", "api/*.gen.go\n")
+	writeCLIFile(t, repo, "api/doc.go", "package api\n")
+	writeCLIFile(t, repo, "server/server.go", `package server
+
+import "example.com/app/api"
+
+func Handle(request api.Request) int { return request.ID }
+`)
+	writeCLIFile(t, repo, "lib/lib.go", "package lib\n\nfunc Value() int { return 1 }\n")
+	oldCommit := commitCLIRepository(t, repo, "old")
+	writeCLIFile(t, repo, "lib/lib.go", "package lib\n\nfunc Value() int { return 2 }\n")
+	newCommit := commitCLIRepository(t, repo, "new")
+	t.Setenv("RIPPLES_CACHE", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run(t.Context(), []string{
+		"-repo", repo,
+		"-old", oldCommit,
+		"-new", newCommit,
+		"-prepare", `printf 'package api\n\ntype Request struct{ ID int }\n' > api/request.gen.go`,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if want := "lib.lib\n"; stdout.String() != want {
+		t.Fatalf("run() stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestRunPrunesStaleCacheEntries(t *testing.T) {
+	repo := initCLIRepository(t)
+	writeCLIFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")
+	writeCLIFile(t, repo, "lib/lib.go", "package lib\n\nfunc Value() int { return 1 }\n")
+	oldCommit := commitCLIRepository(t, repo, "old")
+	writeCLIFile(t, repo, "lib/lib.go", "package lib\n\nfunc Value() int { return 2 }\n")
+	newCommit := commitCLIRepository(t, repo, "new")
+	cacheDir := t.TempDir()
+	t.Setenv("RIPPLES_CACHE", cacheDir)
+	stale := filepath.Join(cacheDir, "package-snapshots", "stale.json")
+	writeCLIFile(t, cacheDir, "package-snapshots/stale.json", "{}")
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run(t.Context(), []string{"-repo", repo, "-old", oldCommit, "-new", newCommit}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale cache entry still exists: %v", err)
+	}
+}
+
+func TestRunStopsWhenContextIsCanceled(t *testing.T) {
+	repo := initCLIRepository(t)
+	writeCLIFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")
+	writeCLIFile(t, repo, "lib/lib.go", "package lib\n\nfunc Value() string { return \"old\" }\n")
+	oldCommit := commitCLIRepository(t, repo, "old")
+	writeCLIFile(t, repo, "lib/lib.go", "package lib\n\nfunc Value() string { return \"new\" }\n")
+	newCommit := commitCLIRepository(t, repo, "new")
+	t.Setenv("RIPPLES_CACHE", t.TempDir())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	code := run(ctx, []string{"-repo", repo, "-old", oldCommit, "-new", newCommit}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), context.Canceled.Error()) {
+		t.Fatalf("run() code = %d, stderr = %q; want canceled analysis", code, stderr.String())
 	}
 }
 

@@ -64,7 +64,7 @@ replace example.com/libs => ../../libs
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	worktreeDir := source.worktreeDir
+	exportDir := source.tempDir
 
 	assertFileContent(t, filepath.Join(source.Dir, "go.mod"), `module example.com/app
 
@@ -79,15 +79,12 @@ replace example.com/libs => ../../libs
 	if err := source.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if _, err := os.Stat(worktreeDir); !os.IsNotExist(err) {
-		t.Fatalf("worktree directory still exists after Close(): %v", err)
-	}
-	if got := gitCommand(t, repo, "worktree", "list", "--porcelain"); strings.Contains(got, worktreeDir) {
-		t.Fatalf("worktree still registered after Close():\n%s", got)
+	if _, err := os.Stat(exportDir); !os.IsNotExist(err) {
+		t.Fatalf("export directory still exists after Close(): %v", err)
 	}
 }
 
-func TestOpenRevisionSupportsConcurrentWorktrees(t *testing.T) {
+func TestOpenRevisionSupportsConcurrentExports(t *testing.T) {
 	const worktreeCount = 16
 
 	repo := initRepository(t)
@@ -158,14 +155,60 @@ func TestOpenRevisionCleansUpWhenSubdirectoryIsMissing(t *testing.T) {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	revision.Subdir = filepath.Join("missing", "module")
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
 
 	if _, err := OpenRevision(context.Background(), revision); err == nil {
 		t.Fatal("OpenRevision() error = nil, want missing subdirectory error")
 	}
-	worktrees := gitCommand(t, repo, "worktree", "list", "--porcelain")
-	if strings.Count(worktrees, "\nworktree ") != 0 {
-		t.Fatalf("failed snapshot left a worktree registered:\n%s", worktrees)
+	if entries, err := os.ReadDir(tempDir); err != nil || len(entries) != 0 {
+		t.Fatalf("failed snapshot left temporary files: %v %v", entries, err)
 	}
+}
+
+func TestOpenRevisionLeavesRepositoryMetadataAndHooksUntouched(t *testing.T) {
+	repo := initRepository(t)
+	writeFile(t, filepath.Join(repo, "value.txt"), "value")
+	commit := commitAll(t, repo, "initial")
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	hook := filepath.Join(repo, ".git", "hooks", "post-checkout")
+	writeFile(t, hook, "#!/bin/sh\ntouch '"+marker+"'\n")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := Open(context.Background(), repo, commit)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if got := gitCommand(t, repo, "worktree", "list", "--porcelain"); strings.Count(got, "worktree ") != 1 {
+		t.Fatalf("snapshot registered a worktree:\n%s", got)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("post-checkout hook ran while opening a snapshot: %v", err)
+	}
+}
+
+func TestOpenRevisionExtractsFilesOutsideSparseCheckout(t *testing.T) {
+	repo := initRepository(t)
+	writeFile(t, filepath.Join(repo, "api", "api.txt"), "api")
+	writeFile(t, filepath.Join(repo, "billing", "billing.txt"), "billing")
+	commit := commitAll(t, repo, "initial")
+	gitCommand(t, repo, "sparse-checkout", "set", "api")
+
+	source, err := Open(context.Background(), repo, commit)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := source.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+	assertFileContent(t, filepath.Join(source.Dir, "billing", "billing.txt"), "billing")
 }
 
 func TestOpenRejectsUnknownRevision(t *testing.T) {

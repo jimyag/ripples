@@ -86,7 +86,8 @@ jobs:
 - `fetch-depth: 0` 确保 runner 上存在 base commit。
 - `checksums.txt` 用于验证下载的 Release 二进制。
 - `RIPPLES_CACHE` 必须是绝对路径；示例使用 runner 的临时目录并通过 `actions/cache` 跨任务复用。
-- `simple` 输出每行一个 `<相对路径>.<package 名>`，适合用 `grep -Fxq` 映射到 binary、service、label 或测试任务。
+- `simple` 输出每行一个 `<相对路径>.<package 名>`，适合用 `grep -Fxq` 映射到 binary、service、label 或测试任务。`_test.go` 参与分析，只修改测试的 PR 也会报出对应 package；被删除的 package 不会出现在 `simple` 输出中。
+- 仓库依赖不提交的生成代码时，在分析命令中加上 `-prepare 'go generate ./...'` 或对应的生成命令，runner 上需要安装生成工具。
 - 示例始终下载最新 Release。如果需要完全可复现的流水线，可以把 Release tag 和 checksum 固定在仓库配置中。
 
 更多 CLI 和缓存说明见[安装与使用](usage.md)，影响范围的语义见[分析能力](analysis.md)。

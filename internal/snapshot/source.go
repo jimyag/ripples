@@ -7,14 +7,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 )
 
-var repositoryWorktreeLocks sync.Map
-
-// Source is an immutable checkout of a Git commit in a temporary detached
-// worktree. Dir points to the same repository-relative directory passed to
-// Resolve. Close removes the worktree.
+// Source is an immutable export of a Git tree in a temporary directory. Dir
+// points to the same repository-relative directory passed to Resolve. Close
+// removes the export.
 type Source struct {
 	RepoPath string
 	GitRoot  string
@@ -23,10 +20,7 @@ type Source struct {
 	Tree     string
 	Dir      string
 
-	tempDir     string
-	worktreeDir string
-	closeOnce   sync.Once
-	closeErr    error
+	tempDir string
 }
 
 // Revision identifies an immutable Git tree.
@@ -48,7 +42,7 @@ func Resolve(ctx context.Context, repoPath, ref string) (*Revision, error) {
 		repoPath = resolved
 	}
 
-	gitRoot, err := gitOutput(ctx, repoPath, "rev-parse", "--show-toplevel")
+	gitRoot, err := gitOutput(ctx, repoPath, nil, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return nil, err
 	}
@@ -63,11 +57,11 @@ func Resolve(ctx context.Context, repoPath, ref string) (*Revision, error) {
 		return nil, fmt.Errorf("repository path %s is outside Git root %s", repoPath, gitRoot)
 	}
 
-	commit, err := gitOutput(ctx, repoPath, "rev-parse", "--verify", ref+"^{commit}")
+	commit, err := gitOutput(ctx, repoPath, nil, "rev-parse", "--verify", ref+"^{commit}")
 	if err != nil {
 		return nil, err
 	}
-	tree, err := gitOutput(ctx, repoPath, "rev-parse", "--verify", commit+"^{tree}")
+	tree, err := gitOutput(ctx, repoPath, nil, "rev-parse", "--verify", commit+"^{tree}")
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +75,7 @@ func Resolve(ctx context.Context, repoPath, ref string) (*Revision, error) {
 	}, nil
 }
 
-// Open resolves ref and checks it out without changing the repository worktree.
+// Open resolves ref and exports it without changing the repository.
 func Open(ctx context.Context, repoPath, ref string) (*Source, error) {
 	revision, err := Resolve(ctx, repoPath, ref)
 	if err != nil {
@@ -90,34 +84,40 @@ func Open(ctx context.Context, repoPath, ref string) (*Source, error) {
 	return OpenRevision(ctx, revision)
 }
 
-// OpenRevision checks out a resolved revision in a detached worktree.
+// OpenRevision exports the complete tree of a resolved revision into a
+// temporary directory, preserving the repository layout.
 func OpenRevision(ctx context.Context, revision *Revision) (*Source, error) {
-	tempDir, err := os.MkdirTemp("", "ripples-worktree-*")
+	tempDir, err := os.MkdirTemp("", "ripples-source-*")
 	if err != nil {
-		return nil, fmt.Errorf("create worktree parent: %w", err)
+		return nil, fmt.Errorf("create source directory: %w", err)
 	}
-	// Git derives its administrative worktree name from the checkout
-	// directory basename. Keep that basename unique so concurrent snapshots
-	// cannot race on .git/worktrees/<name>.
-	worktreeDir := filepath.Join(tempDir, filepath.Base(tempDir))
-
+	root := filepath.Join(tempDir, "tree")
 	source := &Source{
-		RepoPath:    revision.RepoPath,
-		GitRoot:     revision.GitRoot,
-		Subdir:      revision.Subdir,
-		Commit:      revision.Commit,
-		Tree:        revision.Tree,
-		Dir:         filepath.Join(worktreeDir, revision.Subdir),
-		tempDir:     tempDir,
-		worktreeDir: worktreeDir,
+		RepoPath: revision.RepoPath,
+		GitRoot:  revision.GitRoot,
+		Subdir:   revision.Subdir,
+		Commit:   revision.Commit,
+		Tree:     revision.Tree,
+		Dir:      filepath.Join(root, revision.Subdir),
+		tempDir:  tempDir,
 	}
-	lock := repositoryWorktreeLock(revision.GitRoot)
-	lock.Lock()
-	_, err = gitOutput(ctx, revision.GitRoot, "worktree", "add", "--detach", worktreeDir, revision.Commit)
-	lock.Unlock()
-	if err != nil {
-		_ = os.RemoveAll(tempDir)
-		return nil, fmt.Errorf("create detached worktree: %w", err)
+
+	// A private index keeps the repository index, worktree list, hooks and
+	// sparse-checkout state untouched. Sparse checkout is disabled so the
+	// export always contains the whole tree, and LFS objects stay pointers
+	// because Go analysis never needs their content.
+	env := append(os.Environ(),
+		"GIT_INDEX_FILE="+filepath.Join(tempDir, "index"),
+		"GIT_LFS_SKIP_SMUDGE=1",
+	)
+	for _, args := range [][]string{
+		{"-c", "core.sparseCheckout=false", "read-tree", revision.Tree},
+		{"-c", "core.sparseCheckout=false", "checkout-index", "--all", "--prefix=" + root + string(filepath.Separator)},
+	} {
+		if _, err := gitOutput(ctx, revision.GitRoot, env, args...); err != nil {
+			_ = source.Close()
+			return nil, fmt.Errorf("export tree %s: %w", revision.Tree, err)
+		}
 	}
 	if info, err := os.Stat(source.Dir); err != nil {
 		_ = source.Close()
@@ -129,36 +129,18 @@ func OpenRevision(ctx context.Context, revision *Revision) (*Source, error) {
 	return source, nil
 }
 
-// Close removes the detached worktree and its temporary parent.
+// Close removes the exported tree.
 func (s *Source) Close() error {
-	if s == nil {
+	if s == nil || s.tempDir == "" {
 		return nil
 	}
-	s.closeOnce.Do(func() {
-		if s.worktreeDir != "" {
-			lock := repositoryWorktreeLock(s.GitRoot)
-			lock.Lock()
-			_, err := gitOutput(context.Background(), s.GitRoot, "worktree", "remove", "--force", s.worktreeDir)
-			lock.Unlock()
-			if err != nil {
-				s.closeErr = err
-			}
-		}
-		if err := os.RemoveAll(s.tempDir); err != nil && s.closeErr == nil {
-			s.closeErr = err
-		}
-	})
-	return s.closeErr
+	return os.RemoveAll(s.tempDir)
 }
 
-func repositoryWorktreeLock(gitRoot string) *sync.Mutex {
-	lock, _ := repositoryWorktreeLocks.LoadOrStore(gitRoot, &sync.Mutex{})
-	return lock.(*sync.Mutex)
-}
-
-func gitOutput(ctx context.Context, repoPath string, args ...string) (string, error) {
+func gitOutput(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = repoPath
+	cmd.Dir = dir
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
