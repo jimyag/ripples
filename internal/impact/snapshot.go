@@ -75,6 +75,12 @@ const (
 	chunkNamespace    = "snapshot-chunks"
 )
 
+// CacheNamespaces lists the cache namespaces ripples writes, including those
+// of earlier versions so that pruning also removes their stale entries.
+func CacheNamespaces() []string {
+	return []string{manifestNamespace, chunkNamespace, "package-snapshots", "module-snapshots"}
+}
+
 type snapshotManifest struct {
 	Tree       string   `json:"tree"`
 	ModulePath string   `json:"module_path"`

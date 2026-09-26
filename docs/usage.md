@@ -171,7 +171,7 @@ dot -Tsvg impact.dot -o impact.svg
 
 ## 缓存
 
-ripples 使用 Git tree、分析格式版本、Go toolchain 和实际生效的构建配置生成内容寻址缓存键。相同 tree 和构建配置的重复分析可以直接复用 package snapshot。每次分析结束后，先删除 7 天内没有被读写过的条目，总大小仍超过上限时再按最近使用时间从旧到新删除，直到不超过上限；持续被使用的 snapshot（例如 main 分支）会保留。
+ripples 使用 Git tree、分析格式版本、Go toolchain 和实际生效的构建配置生成内容寻址缓存键。相同 tree 和构建配置的重复分析可以直接复用 package snapshot。每次分析结束后，先删除 7 天内没有被读写过的条目，总大小仍超过上限时再按最近使用时间从旧到新删除，直到不超过上限；持续被使用的 snapshot（例如 main 分支）会保留。清理只删除 ripples 自己写入的缓存条目，缓存目录中的其他文件不受影响。
 
 上限默认 1024 MB，可以用 `RIPPLES_CACHE_MAX_MB` 调整。snapshot 按 package 分块、以内容 hash 去重并经 gzip 压缩，不同提交中未改动的 package 共用同一份数据。例如约 3000 个 Go 文件的仓库，连续 50 个提交的缓存约 30 MB；按整棵 tree 分别存储时约 140 MB。
 

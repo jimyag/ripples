@@ -153,7 +153,7 @@ module 信息来自构建 package snapshot 时的同一次元数据加载，保�
 
 分析 key 包含分析格式版本、graph kind、Git tree、module 相对目录、编译 ripples 的 Go 版本、`go env -json` 报告的实际生效构建配置（在任何 module 之外执行，因此包含环境变量和 `go env -w` 的设置），以及 `-prepare` 命令和 `-tests`。
 
-缓存命中后不会导出 tree，并刷新条目的修改时间。每次分析结束后 `Prune` 先删除 7 天内没有读写的条目；总大小仍超过 `MaxBytes`（默认 1024 MB，`RIPPLES_CACHE_MAX_MB` 覆盖）时，按修改时间从旧到新删除，直到不超过上限。读取损坏或不可用的缓存会回退到重新构建；写入失败会返回错误，避免把未持久化结果误认为成功缓存。写入先创建临时文件，再通过 rename 原子提交。
+缓存命中后不会导出 tree，并刷新条目的修改时间。每次分析结束后 `Prune` 先删除 7 天内没有读写的条目；总大小仍超过 `MaxBytes`（默认 1024 MB，`RIPPLES_CACHE_MAX_MB` 覆盖）时，按修改时间从旧到新删除，直到不超过上限。清理只处理 `impact.CacheNamespaces` 列出的命名空间（包括旧版本的 `package-snapshots`、`module-snapshots`），并且只删除条目文件（`*.json.gz`、旧版的 `*.json`）和中断写入留下的临时文件；临时文件只按时间过期，不参与按大小淘汰，避免删掉另一个进程正在写入的文件。缓存目录因此可以与其他文件共用。读取损坏或不可用的缓存会回退到重新构建；写入失败会返回错误，避免把未持久化结果误认为成功缓存。写入先创建临时文件，再通过 rename 原子提交。
 
 改变 snapshot schema 或分析语义时，需要同时提升 `analysisVersion`；改变通用缓存编码时，需要提升 `cacheVersion`。
 

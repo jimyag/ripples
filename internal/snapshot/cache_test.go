@@ -116,7 +116,7 @@ func TestCachePrunesEntriesUnusedForMaxAge(t *testing.T) {
 		t.Fatalf("Load(read) = %v, %v", hit, err)
 	}
 
-	if err := cache.Prune(7 * 24 * time.Hour); err != nil {
+	if err := cache.Prune(7*24*time.Hour, "snapshots"); err != nil {
 		t.Fatalf("Prune() error = %v", err)
 	}
 	for key, want := range map[string]bool{"stale": false, "fresh": true, "read": true} {
@@ -147,7 +147,7 @@ func TestCachePruneEvictsLeastRecentlyUsedEntriesOverMaxSize(t *testing.T) {
 	}
 	cache.MaxBytes = 2 * entrySize
 
-	if err := cache.Prune(7 * 24 * time.Hour); err != nil {
+	if err := cache.Prune(7*24*time.Hour, "snapshots"); err != nil {
 		t.Fatalf("Prune() error = %v", err)
 	}
 	var value string
@@ -155,6 +155,50 @@ func TestCachePruneEvictsLeastRecentlyUsedEntriesOverMaxSize(t *testing.T) {
 		want := index >= len(keys)-2
 		if hit, err := cache.Load("snapshots", key, &value); err != nil || hit != want {
 			t.Errorf("Load(%s) = %v, %v; want hit %v", key, hit, err, want)
+		}
+	}
+}
+
+// RIPPLES_CACHE may point to a directory shared with other tools, so pruning
+// must only remove ripples entries.
+func TestCachePruneLeavesUnrelatedFiles(t *testing.T) {
+	cache := &Cache{Dir: t.TempDir(), MaxBytes: 1}
+	for _, key := range []string{"stale", "fresh"} {
+		if err := cache.Store("snapshots", key, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelated := []string{
+		filepath.Join(cache.Dir, "other-tool", "data.json"),
+		filepath.Join(cache.Dir, "snapshots", "notes.txt"),
+	}
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	for _, name := range unrelated {
+		if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(name, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(cache.filename("snapshots", "stale"), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cache.Prune(7*24*time.Hour, "snapshots"); err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	for _, key := range []string{"stale", "fresh"} {
+		if _, err := os.Stat(cache.filename("snapshots", key)); !os.IsNotExist(err) {
+			t.Errorf("entry %s survived pruning over the size limit: %v", key, err)
+		}
+	}
+	for _, name := range unrelated {
+		if _, err := os.Stat(name); err != nil {
+			t.Errorf("Prune() removed unrelated file %s: %v", name, err)
 		}
 	}
 }

@@ -95,7 +95,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		)
 	}
 	// The result is already complete; a failed cleanup only leaves old entries.
-	if err := cache.Prune(cacheMaxAge); err != nil {
+	if err := cache.Prune(cacheMaxAge, impact.CacheNamespaces()...); err != nil {
 		_, _ = fmt.Fprintf(stderr, "warning: prune cache: %v\n", err)
 	}
 	return 0

@@ -171,7 +171,7 @@ Generating DOT text does not require Graphviz. The `dot` command is only needed 
 
 ## Cache
 
-ripples builds content-addressed cache keys from the Git tree, analysis format version, Go toolchain, and effective build configuration. Repeated analyses of the same tree and configuration reuse the package snapshot. After every analysis, entries that have not been read or written for 7 days are removed first; if the cache still exceeds its size limit, the least recently used entries are removed until it fits. Snapshots in regular use, such as the main branch, stay.
+ripples builds content-addressed cache keys from the Git tree, analysis format version, Go toolchain, and effective build configuration. Repeated analyses of the same tree and configuration reuse the package snapshot. After every analysis, entries that have not been read or written for 7 days are removed first; if the cache still exceeds its size limit, the least recently used entries are removed until it fits. Snapshots in regular use, such as the main branch, stay. Pruning only removes cache entries that ripples wrote; other files in the cache directory are left alone.
 
 The limit defaults to 1024 MB and can be changed with `RIPPLES_CACHE_MAX_MB`. Snapshots are split into per-package chunks deduplicated by content hash and gzip-compressed, so unchanged packages share one copy across commits. For a repository with about 3,000 Go files, 50 consecutive commits take about 30 MB, compared with about 140 MB when every tree is stored whole.
 

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -96,17 +97,12 @@ func (c *Cache) Touch(namespace, key string) bool {
 	return os.Chtimes(c.filename(namespace, key), now, now) == nil
 }
 
-// Prune removes entries that no analysis has read or written for maxAge, then
-// the least recently used entries until the cache fits in MaxBytes.
-func (c *Cache) Prune(maxAge time.Duration) error {
+// Prune removes the entries of the given namespaces that no analysis has read
+// or written for maxAge, then the least recently used ones until they fit in
+// MaxBytes. It only touches cache entries and abandoned temporary files in
+// those namespaces, so the cache directory may be shared with other files.
+func (c *Cache) Prune(maxAge time.Duration, namespaces ...string) error {
 	cutoff := time.Now().Add(-maxAge)
-	namespaces, err := os.ReadDir(c.Dir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read cache directory: %w", err)
-	}
 	type entry struct {
 		path string
 		size int64
@@ -123,27 +119,37 @@ func (c *Cache) Prune(maxAge time.Duration) error {
 		}
 	}
 	for _, namespace := range namespaces {
-		if !namespace.IsDir() {
+		dir := filepath.Join(c.Dir, namespace)
+		files, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
 			continue
 		}
-		dir := filepath.Join(c.Dir, namespace.Name())
-		files, err := os.ReadDir(dir)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("read cache namespace: %w", err))
 			continue
 		}
 		for _, file := range files {
+			name := file.Name()
+			// Entries are *.json.gz, or *.json before entries were compressed.
+			// Temporary files of an interrupted Store only age out, since
+			// another process may still be writing a recent one.
+			temporary := strings.HasPrefix(name, "entry-")
+			if !temporary && !strings.HasSuffix(name, ".json.gz") && !strings.HasSuffix(name, ".json") {
+				continue
+			}
 			info, err := file.Info()
 			if err != nil || !info.Mode().IsRegular() {
 				continue
 			}
-			path := filepath.Join(dir, file.Name())
+			path := filepath.Join(dir, name)
 			if info.ModTime().Before(cutoff) {
 				remove(path)
 				continue
 			}
-			kept = append(kept, entry{path: path, size: info.Size(), used: info.ModTime()})
-			total += info.Size()
+			if !temporary {
+				kept = append(kept, entry{path: path, size: info.Size(), used: info.ModTime()})
+				total += info.Size()
+			}
 		}
 	}
 	// Load refreshes the modification time, so the oldest entries are the
