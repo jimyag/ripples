@@ -9,7 +9,7 @@ ripples compares two immutable Git revisions and returns affected Go packages as
 ```text
 Git ref
   -> internal/snapshot: resolve tree, export it through a private index, persistent cache
-  -> internal/impact: AST/type declaration digest (tests with -tests) + SSA interface conversions + old/new dependency graph
+  -> internal/impact: go/packages metadata + dependency export data, local go/types checking (tests with -tests), declaration digest + SSA interface conversions + old/new dependency graph
   -> internal/output: simple/json/text/summary/dot
   -> main.go: CLI
 ```
@@ -26,7 +26,7 @@ Important invariants:
 - Deduplicate by full package path and sort output deterministically.
 - Treat analysis errors as command failures; never return partial results as complete.
 - Cache keys must include the Git tree, tool version, effective `go env` build configuration, the `-prepare` command and `-tests`.
-- Prefer the standard library, the go command, git plumbing and golang.org/x/tools over hand-written analysis.
+- Build as little as possible while keeping performance and accuracy: prefer the standard library, the go command, git plumbing and golang.org/x/tools, and write custom code only where they measurably fall short (for example, local packages are type-checked by `internal/impact/load.go` because go/packages would compile the whole module).
 
 ## Commands
 

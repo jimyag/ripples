@@ -180,50 +180,9 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare 
 	if err := runPrepare(ctx, source.Dir, prepare); err != nil {
 		return PackageSnapshot{}, err
 	}
-	// ./... already makes every local package an initial package. Omitting
-	// NeedDeps keeps dependency function bodies as black boxes instead of
-	// retaining syntax and type information for the full transitive graph.
-	cfg := &gopackages.Config{
-		Context: ctx,
-		Dir:     source.Dir,
-		Mode: gopackages.NeedName |
-			gopackages.NeedFiles |
-			gopackages.NeedCompiledGoFiles |
-			gopackages.NeedImports |
-			gopackages.NeedModule |
-			gopackages.NeedEmbedFiles |
-			gopackages.NeedSyntax |
-			gopackages.NeedTypes |
-			gopackages.NeedTypesInfo |
-			gopackages.NeedForTest,
-		// With tests, test variants and external test packages are analyzed so
-		// test-only changes and declarations used by tests reach their packages.
-		Tests: tests,
-		// go list compiles export data for every listed package. Without
-		// -trimpath the build cache keys that output by the export directory,
-		// so every run recompiled the whole module into new cache entries;
-		// with it, unchanged packages hit the cache across runs and trees.
-		BuildFlags: []string{"-trimpath"},
-		ParseFile:  parseAnalysisFile,
-	}
-	loaded, err := gopackages.Load(cfg, "./...")
+	loaded, err := loadPackages(ctx, source.Dir, tests)
 	if err != nil {
-		return PackageSnapshot{}, fmt.Errorf("load package graph: %w", err)
-	}
-	loaded = slices.DeleteFunc(loaded, isTestMain)
-	if len(loaded) == 0 {
-		return PackageSnapshot{}, fmt.Errorf("no Go packages found")
-	}
-
-	var packageErrors []string
-	for _, pkg := range loaded {
-		for _, pkgErr := range pkg.Errors {
-			packageErrors = append(packageErrors, pkgErr.Error())
-		}
-	}
-	if len(packageErrors) > 0 {
-		sort.Strings(packageErrors)
-		return PackageSnapshot{}, fmt.Errorf("load package graph: %s", strings.Join(packageErrors, "; "))
+		return PackageSnapshot{}, err
 	}
 
 	modulePath := findModulePath(loaded)
@@ -231,9 +190,9 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare 
 		return PackageSnapshot{}, fmt.Errorf("cannot determine module path")
 	}
 
-	// Module identities come from the same export, so the package graph and
+	// Module identities come from the same load, so the package graph and
 	// the module graph always describe one Git tree.
-	modules, err := buildModuleSnapshot(ctx, source.Dir)
+	modules, err := buildModuleSnapshot(ctx, source.Dir, loaded)
 	if err != nil {
 		return PackageSnapshot{}, err
 	}

@@ -175,7 +175,7 @@ ripples builds content-addressed cache keys from the Git tree, analysis format v
 
 The limit defaults to 1024 MB and can be changed with `RIPPLES_CACHE_MAX_MB`. Snapshots are split into per-package chunks deduplicated by content hash and gzip-compressed, so unchanged packages share one copy across commits. For a repository with about 3,000 Go files, 50 consecutive commits take about 30 MB, compared with about 140 MB when every tree is stored whole.
 
-ripples obtains dependency type information through `go list -export`, which writes compiled output to the Go build cache (`GOCACHE`). Unchanged packages are reused by later analyses, and Go automatically removes entries unused for 5 days. Caching `GOCACHE` in CI as well (for example with the default cache of `actions/setup-go`) shortens cold analyses.
+ripples type-checks the current module's packages from source itself and only uses `go list -export` for the type information of standard-library and third-party dependencies. Their compiled output goes to the Go build cache (`GOCACHE`), each version is compiled once, and later analyses reuse it; Go automatically removes entries unused for 5 days. Caching `GOCACHE` in CI as well (for example with the default cache of `actions/setup-go`) saves compiling the dependencies on the first analysis.
 
 The default location comes from Go's `os.UserCacheDir`:
 

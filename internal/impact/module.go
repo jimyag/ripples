@@ -28,22 +28,10 @@ type packageModules struct {
 	SumKeys []string `json:"sum_keys,omitempty"`
 }
 
-func buildModuleSnapshot(ctx context.Context, root string) (moduleSnapshot, error) {
-	loaded, err := gopackages.Load(&gopackages.Config{
-		Context: ctx,
-		Dir:     root,
-		Mode: gopackages.NeedName |
-			gopackages.NeedImports |
-			gopackages.NeedDeps |
-			gopackages.NeedModule,
-	}, "./...")
-	if err != nil {
-		return moduleSnapshot{}, fmt.Errorf("load module dependency graph: %w", err)
-	}
-	if err := packageLoadError(loaded); err != nil {
-		return moduleSnapshot{}, err
-	}
-
+// buildModuleSnapshot maps every local package to the modules it depends on.
+// loaded holds the packages matching ./... with their dependency metadata;
+// test variants are skipped so the result does not depend on -tests.
+func buildModuleSnapshot(ctx context.Context, root string, loaded []*gopackages.Package) (moduleSnapshot, error) {
 	workFilename, err := goWorkFile(ctx, root)
 	if err != nil {
 		return moduleSnapshot{}, err
@@ -67,23 +55,11 @@ func buildModuleSnapshot(ctx context.Context, root string) (moduleSnapshot, erro
 	}
 	memo := make(map[string]packageModules)
 	for _, pkg := range loaded {
-		result.Packages[pkg.PkgPath] = collectPackageModules(pkg, memo)
-	}
-	return result, nil
-}
-
-func packageLoadError(packages []*gopackages.Package) error {
-	var messages []string
-	for _, pkg := range packages {
-		for _, packageErr := range pkg.Errors {
-			messages = append(messages, packageErr.Error())
+		if pkg.ForTest == "" {
+			result.Packages[pkg.PkgPath] = collectPackageModules(pkg, memo)
 		}
 	}
-	if len(messages) == 0 {
-		return nil
-	}
-	sort.Strings(messages)
-	return fmt.Errorf("load module dependency graph: %s", strings.Join(messages, "; "))
+	return result, nil
 }
 
 func collectPackageModules(pkg *gopackages.Package, memo map[string]packageModules) packageModules {

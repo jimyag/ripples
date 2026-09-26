@@ -46,13 +46,17 @@ The core data structures are defined in [`internal/impact/snapshot.go`](../inter
 | `Package` | Package path, name, and content hash; analysis results also mark deleted packages |
 | `Symbol` | Stable declaration ID, semantic hash, package path, and dependency IDs |
 
-`buildPackageSnapshot` first runs the optional `-prepare` command, then loads `./...` through `golang.org/x/tools/go/packages`, requesting local ASTs, type information, imports, module metadata, embed files, and other compiler inputs without `NeedDeps`. Standard-library and third-party packages therefore remain type/import contracts whose function bodies are not traversed. The current Go toolchain, `GOOS`, `GOARCH`, build tags, and CGo configuration select the compiled files.
+`buildPackageSnapshot` first runs the optional `-prepare` command, then `loadPackages` in [`internal/impact/load.go`](../internal/impact/load.go) loads `./...`:
 
-`Tests: true` is set only with `-tests`. The default result drives builds and deployments, which do not need test files; tests are often larger than the non-test code, and loading them makes cold analyses noticeably slower. `-tests` is part of the cache key, so the two modes never share snapshots.
+1. `golang.org/x/tools/go/packages` reads metadata: files, the import graph, modules, embed files, test variants, and type sizes. No types are requested, so `go list` runs without `-export` and compiles nothing.
+2. The packages matching `./...` and the test variants they use are type-checked from source; every other package is a dependency, and a second go/packages load reads export data for those only. `go list -export` compiles just these dependencies, once per version, after which the Go build cache reuses them; dependencies loaded together share type objects. Standard-library and third-party packages therefore remain type contracts whose function bodies are not traversed.
+3. Local packages are type-checked concurrently with `go/types` in import order, and a file shared by test variants is parsed once. Variants recompiled only for tests, which are not analyzed, skip function bodies.
 
-go/packages makes `go list -export` compile export data for every listed package, including the local packages that are then type-checked from source. Loading passes `-trimpath`: otherwise the Go build cache keys that output by package directory, and since every export uses a new temporary directory, every analysis recompiled the whole module into new cache entries; with it, unchanged packages hit the build cache across runs and trees. `-trimpath` only changes the paths recorded in the `//line` directives of cgo-generated files (to module-path form), which are equally stable across exports.
+When go/packages type-checks by itself, `go list -export` also compiles the local packages, which are then checked from source anyway. In a repository with about 3,000 Go files that compilation took most of the cold analysis time and kept growing the Go build cache, so go/packages now only provides metadata and dependency export data. Both `go list` runs pass `-trimpath`, which makes cgo output and compiled dependencies independent of the export directory so they are reused across runs and trees; `-trimpath` only changes the paths recorded in the `//line` directives of cgo-generated files (to module-path form), which are equally stable across exports. The current Go toolchain, `GOOS`, `GOARCH`, build tags, and CGo configuration select the compiled files.
 
-Loading tests returns several variants of a package: the plain package `p`, `p [p.test]` including its `_test.go` files, the external test package `p_test [p.test]`, and dependencies recompiled for the test such as `q [p.test]`. The generated test main is dropped; every other variant is analyzed:
+Test variants are loaded only with `-tests`. The default result drives builds and deployments, which do not need test files; tests are often larger than the non-test code, and loading them makes cold analyses noticeably slower. `-tests` is part of the cache key, so the two modes never share snapshots.
+
+Loading tests returns several variants of a package: the plain package `p`, `p [p.test]` including its `_test.go` files, the external test package `p_test [p.test]`, and dependencies recompiled for the test such as `q [p.test]`. The generated test main is dropped; the first three are analyzed, while `q [p.test]` is only type-checked so imports resolve:
 
 - `reportPath` reports in-package test variants and external test packages as the package under test, while recompiled dependencies keep their own path.
 - A declaration gets the same ID in every variant, so the variants collapse into one symbol, while the type objects of every variant are registered and references from external tests resolve.
@@ -120,7 +124,7 @@ The converting declaration depends on a contract of the converted type and of th
 
 ## 5. Module and Build-Configuration Changes
 
-Module information is computed from the same export as the package snapshot, so the package graph and the module graph always describe one Git tree. [`internal/impact/module.go`](../internal/impact/module.go) loads metadata with `NeedDeps` only to map local packages to third-party module identities and checksum keys; it does not parse third-party function bodies.
+Module information comes from the same metadata load as the package snapshot, so the package graph and the module graph always describe one Git tree. [`internal/impact/module.go`](../internal/impact/module.go) follows its dependency graph to map local packages (excluding test variants) to third-party module identities and checksum keys; it does not parse third-party function bodies.
 
 - `go env GOWORK`, run in the exported module directory, locates the effective go.work, which may live in a parent directory or come from `GOWORK`.
 - The effective configuration hash uses go/toolchain/godebug from the module's go.mod and that go.work.
@@ -165,6 +169,7 @@ The primary package graph omits third-party `NeedDeps`, and persisted snapshots 
 | --- | --- | --- |
 | Revision/export | [`internal/snapshot/source.go`](../internal/snapshot/source.go) | [`internal/snapshot/source_test.go`](../internal/snapshot/source_test.go) |
 | Persistent cache | [`internal/snapshot/cache.go`](../internal/snapshot/cache.go) | [`internal/snapshot/cache_test.go`](../internal/snapshot/cache_test.go) |
+| Loading and type checking | [`internal/impact/load.go`](../internal/impact/load.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | Package snapshot/hash/test variants | [`internal/impact/snapshot.go`](../internal/impact/snapshot.go) | [`internal/impact/snapshot_test.go`](../internal/impact/snapshot_test.go), [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | Declarations and dependencies | [`internal/impact/symbol.go`](../internal/impact/symbol.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | Type contracts and interface conversions | [`internal/impact/contract.go`](../internal/impact/contract.go) | [`internal/impact/interface_flow_test.go`](../internal/impact/interface_flow_test.go) |

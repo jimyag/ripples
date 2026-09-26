@@ -32,7 +32,8 @@ linters:
         linters:
           - gosec
           - unparam
-      - path: internal/impact/(module|snapshot)\.go
+      # These read files that go list reports for the exported revision.
+      - path: internal/impact/(load|module|snapshot)\.go
         text: "G304:"
         linters:
           - gosec

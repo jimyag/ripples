@@ -46,13 +46,17 @@ flowchart LR
 | `Package` | package 路径、名称和内容 hash；分析结果中额外标记被删除的 package |
 | `Symbol` | 一个声明的稳定 ID、语义 hash、所属 package 和依赖声明 ID |
 
-`buildPackageSnapshot` 先执行可选的 `-prepare` 命令，再使用 `golang.org/x/tools/go/packages` 加载 `./...`，请求本地 package 的 AST、类型信息、import、module、embed 和其他编译输入，但不请求 `NeedDeps`。标准库和第三方库因此只作为类型/import 契约，不遍历函数体。实际文件由当前 Go toolchain、`GOOS`、`GOARCH`、build tags 和 CGo 配置决定。
+`buildPackageSnapshot` 先执行可选的 `-prepare` 命令，再由 [`internal/impact/load.go`](../internal/impact/load.go) 的 `loadPackages` 加载 `./...`：
 
-只有指定 `-tests` 时才设置 `Tests: true`。默认结果用于构建和部署，不需要测试文件；测试文件往往比非测试代码更多，加载它们会让冷分析明显变慢。`-tests` 进入缓存 key，两种模式的 snapshot 互不复用。
+1. 用 `golang.org/x/tools/go/packages` 读取元数据：文件、import 图、module、embed、测试变体和类型大小。不请求类型，`go list` 因此不带 `-export`，不编译任何 package。
+2. 匹配 `./...` 的 package 和它们用到的测试变体从源码类型检查；其余 package 都是依赖，再用一次 go/packages 只为它们读取 export data。`go list -export` 只编译这些依赖，同一版本编译一次后由 Go 构建缓存复用；同一次加载内的依赖共享类型对象。标准库和第三方库因此只作为类型契约，不遍历函数体。
+3. 本地 package 按 import 顺序并发地用 `go/types` 检查，同一文件在各测试变体间只解析一次；只为测试重新编译、不参与分析的变体跳过函数体。
 
-go/packages 会让 `go list -export` 为所有列出的 package 编译 export data，包括随后从源码类型检查的本地 package。加载时传入 `-trimpath`：否则 Go 构建缓存的 key 含 package 目录，而每次导出的临时目录都不同，每次分析都会重编整个 module 并写入新的缓存条目；加上后未变化的 package 在不同运行、不同 tree 之间都能命中构建缓存。`-trimpath` 只改变 cgo 生成文件 `//line` 中记录的路径（变为 module 路径形式），这些路径在不同导出之间同样稳定。
+go/packages 自己做类型检查时，`go list -export` 会连本地 package 一起编译，而这些 package 随后仍要从源码检查。约 3000 个 Go 文件的仓库上，这部分编译占了冷分析的大部分时间，也让 Go 构建缓存持续增长，所以只让 go/packages 负责元数据和依赖的 export data。两次 `go list` 都带 `-trimpath`，使 cgo 输出和依赖的编译结果与导出目录无关，能跨运行、跨 tree 复用；`-trimpath` 只改变 cgo 生成文件 `//line` 中记录的路径（变为 module 路径形式），这些路径在不同导出之间同样稳定。实际文件由当前 Go toolchain、`GOOS`、`GOARCH`、build tags 和 CGo 配置决定。
 
-测试加载会返回同一 package 的多个变体：普通 package `p`、包含 `_test.go` 的 `p [p.test]`、外部测试 package `p_test [p.test]`，以及为测试重新编译的依赖 `q [p.test]`。生成的测试 main 被丢弃，其余变体全部参与分析：
+只有指定 `-tests` 时才加载测试变体。默认结果用于构建和部署，不需要测试文件；测试文件往往比非测试代码更多，加载它们会让冷分析明显变慢。`-tests` 进入缓存 key，两种模式的 snapshot 互不复用。
+
+测试加载会返回同一 package 的多个变体：普通 package `p`、包含 `_test.go` 的 `p [p.test]`、外部测试 package `p_test [p.test]`，以及为测试重新编译的依赖 `q [p.test]`。生成的测试 main 被丢弃；前三种参与分析，`q [p.test]` 只做类型检查供导入使用：
 
 - `reportPath` 把内部测试变体和外部测试 package 归到被测 package，重新编译的依赖保留自己的路径。
 - 同一声明在各变体中得到相同 ID，合并为一个 symbol；各变体的类型对象都会登记，外部测试引用的对象也能解析。
@@ -120,7 +124,7 @@ example.com/app/payment::init::payment/init.go::0
 
 ## 5. Module 与构建配置变化
 
-module 信息在构建 package snapshot 的同一次导出中计算，保证 package 图和 module 图描述同一个 Git tree。[`internal/impact/module.go`](../internal/impact/module.go) 使用 `NeedDeps` 加载元数据，只收集本地 package 到第三方 module identity 和 checksum key 的映射，不解析第三方函数体。
+module 信息来自构建 package snapshot 时的同一次元数据加载，保证 package 图和 module 图描述同一个 Git tree。[`internal/impact/module.go`](../internal/impact/module.go) 沿其中的依赖图收集本地 package（不含测试变体）到第三方 module identity 和 checksum key 的映射，不解析第三方函数体。
 
 - `go env GOWORK` 在导出的 module 目录中定位实际生效的 go.work，它可能位于父目录或来自 `GOWORK`。
 - 有效配置 hash 使用 module 的 go.mod 和该 go.work 中的 go/toolchain/godebug。
@@ -165,6 +169,7 @@ old/new package snapshot 依次加载：构建一个 snapshot 已经会用满所
 | --- | --- | --- |
 | revision/导出 | [`internal/snapshot/source.go`](../internal/snapshot/source.go) | [`internal/snapshot/source_test.go`](../internal/snapshot/source_test.go) |
 | 持久缓存 | [`internal/snapshot/cache.go`](../internal/snapshot/cache.go) | [`internal/snapshot/cache_test.go`](../internal/snapshot/cache_test.go) |
+| 加载与类型检查 | [`internal/impact/load.go`](../internal/impact/load.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | package snapshot/hash/测试变体 | [`internal/impact/snapshot.go`](../internal/impact/snapshot.go) | [`internal/impact/snapshot_test.go`](../internal/impact/snapshot_test.go)、[`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | 声明与依赖 | [`internal/impact/symbol.go`](../internal/impact/symbol.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | 类型契约与接口转换 | [`internal/impact/contract.go`](../internal/impact/contract.go) | [`internal/impact/interface_flow_test.go`](../internal/impact/interface_flow_test.go) |

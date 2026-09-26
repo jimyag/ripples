@@ -1940,6 +1940,42 @@ func main() { _ = lib.Value() }
 	}
 }
 
+// An external test that imports a dependent of the package under test makes
+// go list recompile that dependent as a test variant, which is type-checked
+// from source like the package itself.
+func TestAnalyzeLoadsRecompiledTestVariants(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "order/order.go", "package order\n\nfunc Total(a, b int) int { return a + b }\n")
+	writeModuleFile(t, repo, "order/helper_test.go", "package order\n\nfunc double(v int) int { return v * 2 }\n")
+	writeModuleFile(t, repo, "report/report.go", `package report
+
+import "example.com/app/order"
+
+func Summary() int { return order.Total(1, 2) }
+`)
+	writeModuleFile(t, repo, "order/summary_test.go", `package order_test
+
+import (
+	"testing"
+
+	"example.com/app/report"
+)
+
+func TestSummary(t *testing.T) { _ = report.Summary() }
+`)
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "order/order.go", "package order\n\nfunc Total(a, b int) int { return a - b }\n")
+	newCommit := commitModule(t, repo, "new")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	analyzer.Tests = true
+	got, err := analyzer.Analyze(t.Context(), repo, oldCommit, newCommit)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	assertPackages(t, got, []string{"order.order", "report.report"})
+}
+
 func TestAnalyzeIgnoresTestFilesByDefault(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "order/order.go", "package order\n\nfunc Total(a, b int) int { return a + b }\n")

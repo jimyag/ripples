@@ -175,7 +175,7 @@ ripples 使用 Git tree、分析格式版本、Go toolchain 和实际生效的�
 
 上限默认 1024 MB，可以用 `RIPPLES_CACHE_MAX_MB` 调整。snapshot 按 package 分块、以内容 hash 去重并经 gzip 压缩，不同提交中未改动的 package 共用同一份数据。例如约 3000 个 Go 文件的仓库，连续 50 个提交的缓存约 30 MB；按整棵 tree 分别存储时约 140 MB。
 
-ripples 通过 `go list -export` 获取依赖的类型信息，编译结果写入 Go 构建缓存（`GOCACHE`）。未改动的 package 在后续分析中直接复用，Go 会自动清理 5 天未使用的条目。CI 中同时缓存 `GOCACHE`（例如 `actions/setup-go` 的默认缓存）可以缩短冷分析时间。
+ripples 自己从源码检查当前 module 的 package，只通过 `go list -export` 获取标准库和第三方依赖的类型信息。依赖的编译结果写入 Go 构建缓存（`GOCACHE`），同一版本只编译一次，之后的分析直接复用；Go 会自动清理 5 天未使用的条目。CI 中同时缓存 `GOCACHE`（例如 `actions/setup-go` 的默认缓存）可以省去第一次分析时编译依赖的时间。
 
 默认目录来自 Go 的 `os.UserCacheDir`：
 
