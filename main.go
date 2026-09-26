@@ -47,6 +47,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	newCommit := flags.String("new", "", "new commit ID or ref (required)")
 	outputType := flags.String("output", "simple", "output format: simple, text, json, summary, or dot")
 	prepare := flags.String("prepare", "", "shell command run in each exported revision before analysis, such as \"go generate ./...\"")
+	tests := flags.Bool("tests", false, "also analyze _test.go files so test-only changes are reported")
 	verbose := flags.Bool("verbose", false, "show analysis duration")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -73,6 +74,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	started := time.Now()
 	analyzer := impact.NewAnalyzer(cache)
 	analyzer.Prepare = *prepare
+	analyzer.Tests = *tests
 	analysis, err := analyzer.AnalyzeDetailed(ctx, *repoPath, *oldCommit, *newCommit)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "analyze impact: %v\n", err)

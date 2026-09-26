@@ -2,87 +2,50 @@ package impact
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-func TestLoadSnapshotPairRunsConcurrently(t *testing.T) {
-	started := make(chan string, 2)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseLoads := func() {
-		releaseOnce.Do(func() {
-			close(release)
-		})
-	}
-	defer releaseLoads()
+// Building a snapshot holds a whole module in memory, so the two revisions
+// must not be built at the same time.
+func TestLoadSnapshotPairLoadsOneSnapshotAtATime(t *testing.T) {
 	resolve := func(_ context.Context, repoPath, ref string) (*snapshot.Revision, error) {
 		return &snapshot.Revision{RepoPath: repoPath, Commit: ref, Tree: ref}, nil
 	}
+	newStarted := make(chan struct{})
+	overlapped := false
 	load := func(_ context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
-		started <- revision.Commit
-		<-release
+		switch revision.Commit {
+		case "new":
+			close(newStarted)
+		case "old":
+			select {
+			case <-newStarted:
+				overlapped = true
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
 		return &PackageSnapshot{Tree: revision.Commit}, nil
 	}
 
-	type result struct {
-		old *PackageSnapshot
-		new *PackageSnapshot
-		err error
+	oldSnapshot, newSnapshot, err := loadSnapshotPair(context.Background(), "repo", "old", "new", resolve, load)
+	if err != nil {
+		t.Fatalf("loadSnapshotPair() error = %v", err)
 	}
-	done := make(chan result, 1)
-	go func() {
-		oldSnapshot, newSnapshot, err := loadSnapshotPair(
-			context.Background(),
-			"repo",
-			"old",
-			"new",
-			resolve,
-			load,
-		)
-		done <- result{old: oldSnapshot, new: newSnapshot, err: err}
-	}()
-
-	refs := make(map[string]struct{}, 2)
-	for range 2 {
-		select {
-		case ref := <-started:
-			refs[ref] = struct{}{}
-		case <-time.After(time.Second):
-			t.Fatal("snapshots did not start concurrently")
-		}
+	if overlapped {
+		t.Fatal("new snapshot started while the old one was loading")
 	}
-	releaseLoads()
-
-	select {
-	case got := <-done:
-		if got.err != nil {
-			t.Fatalf("loadSnapshotPair() error = %v", got.err)
-		}
-		if got.old.Tree != "old" || got.new.Tree != "new" {
-			t.Fatalf(
-				"loadSnapshotPair() trees = (%q, %q), want (old, new)",
-				got.old.Tree,
-				got.new.Tree,
-			)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("loadSnapshotPair() did not finish")
-	}
-	if _, ok := refs["old"]; !ok {
-		t.Fatal("old snapshot did not start")
-	}
-	if _, ok := refs["new"]; !ok {
-		t.Fatal("new snapshot did not start")
+	if oldSnapshot.Tree != "old" || newSnapshot.Tree != "new" {
+		t.Fatalf("loadSnapshotPair() trees = (%q, %q), want (old, new)", oldSnapshot.Tree, newSnapshot.Tree)
 	}
 }
 
@@ -239,7 +202,7 @@ func (Service) Run() { println("changed") }
 	if err != nil {
 		t.Fatalf("Analyze() error = %v", err)
 	}
-	assertPackages(t, got, []string{"cmd/server.main", "factory.factory", "service.service"})
+	assertPackages(t, got, []string{"cmd/server.main", "service.service"})
 }
 
 func TestTransitiveDependentsDeduplicatesConvergingChanges(t *testing.T) {
@@ -253,7 +216,7 @@ func TestTransitiveDependentsDeduplicatesConvergingChanges(t *testing.T) {
 		"shared-c": {"consumer-d": {}},
 	}
 
-	got := transitiveDependents(changed, reverse)
+	got, _ := transitiveDependents(changed, reverse, nil, nil)
 	want := []string{"change-a", "change-b", "consumer-d", "shared-c"}
 	if len(got) != len(want) {
 		t.Fatalf("transitiveDependents() = %v, want %v", got, want)
@@ -300,7 +263,7 @@ func TestPackageImpactGraphCollapsesDeclarationAndDispatchEdges(t *testing.T) {
 	}
 	changed := map[string]struct{}{paymentMethod: {}}
 	reverse := reverseDependencies(packageSnapshot)
-	affected := transitiveDependents(changed, reverse)
+	affected, _ := transitiveDependents(changed, reverse, nil, nil)
 
 	changedPackages, edges := packageImpactGraph(
 		changed,
@@ -350,7 +313,7 @@ func TestPackageImpactGraphIncludesDeletedDependencyEdges(t *testing.T) {
 	}
 	changed := map[string]struct{}{paymentFunction: {}}
 	reverse := reverseDependencies(oldSnapshot, newSnapshot)
-	affected := transitiveDependents(changed, reverse)
+	affected, _ := transitiveDependents(changed, reverse, nil, nil)
 
 	changedPackages, edges := packageImpactGraph(
 		changed,
@@ -1966,8 +1929,46 @@ func main() { _ = lib.Value() }
 			}
 			newCommit := commitModule(t, repo, "new")
 
-			assertAnalyzedPackages(t, repo, oldCommit, newCommit, test.want)
+			analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+			analyzer.Tests = true
+			got, err := analyzer.Analyze(t.Context(), repo, oldCommit, newCommit)
+			if err != nil {
+				t.Fatalf("Analyze() error = %v", err)
+			}
+			assertPackages(t, got, test.want)
 		})
+	}
+}
+
+func TestAnalyzeIgnoresTestFilesByDefault(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "order/order.go", "package order\n\nfunc Total(a, b int) int { return a + b }\n")
+	writeModuleFile(t, repo, "order/order_test.go", "package order\n\nfunc helper() int { return Total(1, 2) }\n")
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "order/order_test.go", "package order\n\nfunc helper() int { return Total(2, 3) }\n")
+	newCommit := commitModule(t, repo, "new")
+
+	assertAnalyzedPackages(t, repo, oldCommit, newCommit, []string{})
+}
+
+func TestAnalyzeKeepsTestAndNonTestSnapshotsApart(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "order/order.go", "package order\n")
+	commitModule(t, repo, "initial")
+
+	cache := &snapshot.Cache{Dir: t.TempDir()}
+	withoutTests := NewAnalyzer(cache)
+	if _, err := withoutTests.LoadSnapshot(t.Context(), repo, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	withTests := NewAnalyzer(cache)
+	withTests.Tests = true
+	loaded, err := withTests.LoadSnapshot(t.Context(), repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Cached {
+		t.Fatal("snapshot analyzed with tests reused the snapshot built without tests")
 	}
 }
 
@@ -2028,6 +2029,56 @@ func TestLoadSnapshotUsesPersistentCache(t *testing.T) {
 	}
 	if !reflect.DeepEqual(first.Symbols, second.Symbols) {
 		t.Fatalf("cached symbols differ:\nfirst=%v\nsecond=%v", first.Symbols, second.Symbols)
+	}
+	// Empty slices and maps come back as nil, so compare the stored form.
+	firstModules, _ := json.Marshal(first.Modules)
+	secondModules, _ := json.Marshal(second.Modules)
+	if string(firstModules) != string(secondModules) {
+		t.Fatalf("cached modules differ:\nfirst=%s\nsecond=%s", firstModules, secondModules)
+	}
+}
+
+func TestSnapshotCacheSharesUnchangedPackagesAcrossTrees(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "a/a.go", "package a\n\nfunc A() int { return 1 }\n")
+	writeModuleFile(t, repo, "b/b.go", "package b\n\nfunc B() int { return 1 }\n")
+	oldCommit := commitModule(t, repo, "old")
+	writeModuleFile(t, repo, "b/b.go", "package b\n\nfunc B() int { return 2 }\n")
+	newCommit := commitModule(t, repo, "new")
+
+	cache := &snapshot.Cache{Dir: t.TempDir()}
+	analyzer := NewAnalyzer(cache)
+	chunks := func() []os.DirEntry {
+		entries, err := os.ReadDir(filepath.Join(cache.Dir, "snapshot-chunks"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return entries
+	}
+	if _, err := analyzer.LoadSnapshot(context.Background(), repo, oldCommit); err != nil {
+		t.Fatal(err)
+	}
+	stored := len(chunks())
+	if _, err := analyzer.LoadSnapshot(context.Background(), repo, newCommit); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(chunks()); got != stored+1 {
+		t.Fatalf("chunks after second tree = %d, want %d: only package b changed", got, stored+1)
+	}
+
+	// A pruned chunk turns the tree's entry into a miss instead of a partial
+	// snapshot.
+	for _, entry := range chunks() {
+		if err := os.Remove(filepath.Join(cache.Dir, "snapshot-chunks", entry.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, err := analyzer.LoadSnapshot(context.Background(), repo, newCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Cached || len(loaded.Packages) != 2 {
+		t.Fatalf("LoadSnapshot() after pruning chunks = cached %v with %d packages, want a rebuilt snapshot", loaded.Cached, len(loaded.Packages))
 	}
 }
 

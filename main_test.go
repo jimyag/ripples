@@ -255,6 +255,34 @@ func Handle(request api.Request) int { return request.ID }
 	}
 }
 
+func TestRunAnalyzesTestsOnlyWhenRequested(t *testing.T) {
+	repo := initCLIRepository(t)
+	writeCLIFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")
+	writeCLIFile(t, repo, "order/order.go", "package order\n\nfunc Total() int { return 1 }\n")
+	writeCLIFile(t, repo, "order/order_test.go", "package order\n\nfunc helper() int { return Total() + 1 }\n")
+	oldCommit := commitCLIRepository(t, repo, "old")
+	writeCLIFile(t, repo, "order/order_test.go", "package order\n\nfunc helper() int { return Total() + 2 }\n")
+	newCommit := commitCLIRepository(t, repo, "new")
+	t.Setenv("RIPPLES_CACHE", t.TempDir())
+
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{want: ""},
+		{args: []string{"-tests"}, want: "order.order\n"},
+	} {
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"-repo", repo, "-old", oldCommit, "-new", newCommit}, test.args...)
+		if code := run(t.Context(), args, &stdout, &stderr); code != 0 {
+			t.Fatalf("run(%v) code = %d; stderr=%s", test.args, code, stderr.String())
+		}
+		if stdout.String() != test.want {
+			t.Fatalf("run(%v) stdout = %q, want %q", test.args, stdout.String(), test.want)
+		}
+	}
+}
+
 func TestRunPrunesStaleCacheEntries(t *testing.T) {
 	repo := initCLIRepository(t)
 	writeCLIFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")

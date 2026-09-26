@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"sync"
+	"strconv"
 
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-const analysisVersion = "symbol-impact-v26"
+const analysisVersion = "symbol-impact-v28"
 
 // Analyzer computes declaration-level impact between two Git revisions.
 type Analyzer struct {
@@ -23,6 +23,9 @@ type Analyzer struct {
 	// Prepare is a shell command run in each exported tree before loading,
 	// for example to generate code that is not committed.
 	Prepare string
+	// Tests also analyzes _test.go files so test-only changes and
+	// declarations used by tests reach their packages.
+	Tests bool
 }
 
 // Analysis contains affected packages and the reverse package relationships
@@ -78,15 +81,30 @@ func (a *Analyzer) AnalyzeDetailed(ctx context.Context, repoPath, oldRef, newRef
 	moduleChanges := changedModulePackages(&oldSnapshot.Modules, &newSnapshot.Modules)
 	changed := changedSymbols(oldSnapshot, newSnapshot, moduleChanges)
 	reverse := reverseDependencies(oldSnapshot, newSnapshot)
-	affectedSymbols := transitiveDependents(changed, reverse)
+	packageOf := func(id string) string {
+		if symbol, ok := newSnapshot.Symbols[id]; ok {
+			return symbol.PackagePath
+		}
+		return oldSnapshot.Symbols[id].PackagePath
+	}
+	affectedSymbols, explained := transitiveDependents(
+		changed,
+		reverse,
+		dynamicDependencies(oldSnapshot, newSnapshot),
+		packageOf,
+	)
+	// Declarations reached through a dynamic dependency hang off the method
+	// in the package graph, which keeps it connected.
+	for method, users := range explained {
+		if reverse[method] == nil {
+			reverse[method] = make(map[string]struct{})
+		}
+		maps.Copy(reverse[method], users)
+	}
 
 	affectedPackages := make(map[string]struct{})
 	for id := range affectedSymbols {
-		symbol, ok := newSnapshot.Symbols[id]
-		if !ok {
-			symbol = oldSnapshot.Symbols[id]
-		}
-		affectedPackages[symbol.PackagePath] = struct{}{}
+		affectedPackages[packageOf(id)] = struct{}{}
 	}
 
 	results := make([]Package, 0, len(affectedPackages))
@@ -154,29 +172,16 @@ func loadSnapshotPair(
 		return packageSnapshot, packageSnapshot, nil
 	}
 
-	var (
-		oldSnapshot *PackageSnapshot
-		newSnapshot *PackageSnapshot
-		oldErr      error
-		newErr      error
-		wait        sync.WaitGroup
-	)
-	wait.Add(2)
-	go func() {
-		defer wait.Done()
-		oldSnapshot, oldErr = load(ctx, revisions[0])
-	}()
-	go func() {
-		defer wait.Done()
-		newSnapshot, newErr = load(ctx, revisions[1])
-	}()
-	wait.Wait()
-
-	if oldErr != nil {
-		return nil, nil, fmt.Errorf("load old snapshot: %w", oldErr)
+	// Building a snapshot holds the module's syntax, types and SSA in memory
+	// and already uses every CPU, so building both revisions at once doubles
+	// peak memory for little gain; cache hits return quickly either way.
+	oldSnapshot, err := load(ctx, revisions[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("load old snapshot: %w", err)
 	}
-	if newErr != nil {
-		return nil, nil, fmt.Errorf("load new snapshot: %w", newErr)
+	newSnapshot, err := load(ctx, revisions[1])
+	if err != nil {
+		return nil, nil, fmt.Errorf("load new snapshot: %w", err)
 	}
 	return oldSnapshot, newSnapshot, nil
 }
@@ -200,13 +205,10 @@ func (a *Analyzer) loadResolvedSnapshot(
 	revision *snapshot.Revision,
 	config string,
 ) (_ *PackageSnapshot, returnErr error) {
-	key := analysisCacheKey("package-graph", revision, config, a.Prepare)
-	var result PackageSnapshot
+	key := analysisCacheKey("package-graph", revision, config, a.Prepare, strconv.FormatBool(a.Tests))
 	if a.cache != nil {
-		hit, err := a.cache.Load("package-snapshots", key, &result)
-		if err == nil && hit {
-			result.Cached = true
-			return &result, nil
+		if cached, ok := loadCachedSnapshot(a.cache, key); ok {
+			return cached, nil
 		}
 	}
 
@@ -218,12 +220,12 @@ func (a *Analyzer) loadResolvedSnapshot(
 		returnErr = errors.Join(returnErr, source.Close())
 	}()
 
-	result, err = buildPackageSnapshot(ctx, source, a.Prepare)
+	result, err := buildPackageSnapshot(ctx, source, a.Prepare, a.Tests)
 	if err != nil {
 		return nil, err
 	}
 	if a.cache != nil {
-		if err := a.cache.Store("package-snapshots", key, result); err != nil {
+		if err := storeSnapshot(a.cache, key, &result); err != nil {
 			return nil, err
 		}
 	}
@@ -305,26 +307,133 @@ func reverseDependencies(snapshots ...*PackageSnapshot) map[string]map[string]st
 	return reverse
 }
 
-func transitiveDependents(changed map[string]struct{}, reverse map[string]map[string]struct{}) map[string]struct{} {
-	affected := make(map[string]struct{}, len(changed))
-	queue := make([]string, 0, len(changed))
-	for path := range changed {
-		affected[path] = struct{}{}
-		queue = append(queue, path)
-	}
+// dynamicEdge makes a dispatch contract depend on a method only for the
+// declarations that also reach one of the callers.
+type dynamicEdge struct {
+	dispatch string
+	callers  []string
+}
 
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-		for importer := range reverse[current] {
-			if _, seen := affected[importer]; seen {
-				continue
+func dynamicDependencies(snapshots ...*PackageSnapshot) map[string][]dynamicEdge {
+	result := make(map[string][]dynamicEdge)
+	for _, packageSnapshot := range snapshots {
+		for _, symbol := range packageSnapshot.Symbols {
+			for _, dependency := range symbol.Dynamic {
+				result[dependency.ID] = append(result[dependency.ID], dynamicEdge{
+					dispatch: symbol.ID,
+					callers:  dependency.Callers,
+				})
 			}
-			affected[importer] = struct{}{}
-			queue = append(queue, importer)
 		}
 	}
-	return affected
+	return result
+}
+
+// transitiveDependents returns the changed declarations and every declaration
+// that depends on them.
+//
+// A method behind a dynamic edge only runs in a binary that both converts its
+// type to an interface and makes one of the calls. Package initialization and
+// main are separate declarations of one binary, so the two sides meet per
+// package: an affected method marks the declarations reaching either side in
+// packages that reach both, and explained records them by method. They are
+// not propagated further, since their users reach both sides only if their
+// own packages do.
+func transitiveDependents(
+	changed map[string]struct{},
+	reverse map[string]map[string]struct{},
+	dynamic map[string][]dynamicEdge,
+	packageOf func(string) string,
+) (affected map[string]struct{}, explained map[string]map[string]struct{}) {
+	// users over-approximates the declarations reaching id by following
+	// dynamic edges unconditionally.
+	usersByID := make(map[string]map[string]struct{})
+	users := func(id string) map[string]struct{} {
+		if result, ok := usersByID[id]; ok {
+			return result
+		}
+		result := make(map[string]struct{})
+		stack := []string{id}
+		push := func(user string) {
+			if _, seen := result[user]; !seen {
+				result[user] = struct{}{}
+				stack = append(stack, user)
+			}
+		}
+		for len(stack) > 0 {
+			current := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for user := range reverse[current] {
+				push(user)
+			}
+			for _, edge := range dynamic[current] {
+				push(edge.dispatch)
+			}
+		}
+		usersByID[id] = result
+		return result
+	}
+
+	affected = make(map[string]struct{}, len(changed))
+	explained = make(map[string]map[string]struct{})
+	propagated := make(map[string]bool, len(changed))
+	// queue holds declarations whose users are affected; pending holds newly
+	// affected declarations whose dynamic edges are still to be followed.
+	var queue, pending []string
+	affect := func(id string, propagate bool) {
+		if _, seen := affected[id]; !seen {
+			affected[id] = struct{}{}
+			pending = append(pending, id)
+		}
+		if propagate && !propagated[id] {
+			propagated[id] = true
+			queue = append(queue, id)
+		}
+	}
+	for id := range changed {
+		affect(id, true)
+	}
+	for len(queue) > 0 || len(pending) > 0 {
+		if len(queue) > 0 {
+			current := queue[len(queue)-1]
+			queue = queue[:len(queue)-1]
+			for user := range reverse[current] {
+				affect(user, true)
+			}
+			continue
+		}
+		current := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		for _, edge := range dynamic[current] {
+			converters := users(edge.dispatch)
+			calls := make(map[string]struct{})
+			for _, caller := range edge.callers {
+				calls[caller] = struct{}{}
+				maps.Copy(calls, users(caller))
+			}
+			converting := make(map[string]bool)
+			for id := range converters {
+				converting[packageOf(id)] = true
+			}
+			calling := make(map[string]bool)
+			for id := range calls {
+				calling[packageOf(id)] = true
+			}
+			for _, side := range []map[string]struct{}{converters, calls} {
+				for id := range side {
+					if pkg := packageOf(id); !converting[pkg] || !calling[pkg] {
+						continue
+					}
+					if explained[current] == nil {
+						explained[current] = make(map[string]struct{})
+					}
+					explained[current][id] = struct{}{}
+					affect(id, false)
+				}
+			}
+		}
+	}
+	return affected, explained
 }
 
 func packageImpactGraph(

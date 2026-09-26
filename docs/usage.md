@@ -62,7 +62,7 @@ install -m 0755 "$download_dir/$asset" "$HOME/.local/bin/ripples"
 
 - `git`，用于解析 revision，并通过私有 index 把 tree 导出到临时目录；不会注册 worktree、不会触发仓库 hook。
 - Go toolchain，用于按照目标仓库的 `go.mod`、构建约束和当前环境加载 package。
-- `-repo` 指定的 Go module 目录可以执行 `go list -test ./...`，也就是测试文件也需要能编译。仓库不提交的生成代码可以用 `-prepare` 生成。
+- `-repo` 指定的 Go module 目录可以执行 `go list ./...`；指定 `-tests` 时需要 `go list -test ./...`，也就是测试文件也需要能编译。仓库不提交的生成代码可以用 `-prepare` 生成。
 
 即使通过 Release 安装了预编译二进制，分析目标 Go 项目时仍需要匹配该项目的 Go toolchain。ripples 也会使用编译进二进制的 Go 版本检查源码类型；该版本必须支持待分析的两个 revision 声明的 Go 版本。可以用 `ripples --version` 查看二进制的 `goVersion`。目标项目升级 Go 次版本时，应更新 ripples Release，无需自行编译。
 
@@ -97,6 +97,12 @@ ripples \
 ripples -repo . -old origin/main -new HEAD -prepare 'go generate ./...'
 ```
 
+默认不分析 `_test.go`，结果用于构建和部署时不需要测试文件，冷分析也更快。按影响范围选择测试任务时加 `-tests`，只修改测试的提交也会报出被测 package：
+
+```bash
+ripples -repo . -old origin/main -new HEAD -tests
+```
+
 ### 参数
 
 | 参数 | 说明 | 默认值 |
@@ -106,6 +112,7 @@ ripples -repo . -old origin/main -new HEAD -prepare 'go generate ./...'
 | `-new` | 新 commit ID 或 ref | 必填 |
 | `-output` | `simple`、`json`、`text`、`summary` 或 `dot`；在分析前校验 | `simple` |
 | `-prepare` | 分析前在每个导出 revision 的 module 目录中执行的 shell 命令 | 空 |
+| `-tests` | 同时分析 `_test.go`，报出只修改测试的 package | `false` |
 | `-verbose` | 在 stderr 输出受影响 package 数量和耗时 | `false` |
 
 ## 输出格式
@@ -164,7 +171,11 @@ dot -Tsvg impact.dot -o impact.svg
 
 ## 缓存
 
-ripples 使用 Git tree、分析格式版本、Go toolchain 和实际生效的构建配置生成内容寻址缓存键。相同 tree 和构建配置的重复分析可以直接复用 package snapshot。每次分析结束后，会删除 7 天内没有被读写过的条目；持续被使用的 snapshot（例如 main 分支）会一直保留。
+ripples 使用 Git tree、分析格式版本、Go toolchain 和实际生效的构建配置生成内容寻址缓存键。相同 tree 和构建配置的重复分析可以直接复用 package snapshot。每次分析结束后，先删除 7 天内没有被读写过的条目，总大小仍超过上限时再按最近使用时间从旧到新删除，直到不超过上限；持续被使用的 snapshot（例如 main 分支）会保留。
+
+上限默认 1024 MB，可以用 `RIPPLES_CACHE_MAX_MB` 调整。snapshot 按 package 分块、以内容 hash 去重并经 gzip 压缩，不同提交中未改动的 package 共用同一份数据。例如约 3000 个 Go 文件的仓库，连续 50 个提交的缓存约 30 MB；按整棵 tree 分别存储时约 140 MB。
+
+ripples 通过 `go list -export` 获取依赖的类型信息，编译结果写入 Go 构建缓存（`GOCACHE`）。未改动的 package 在后续分析中直接复用，Go 会自动清理 5 天未使用的条目。CI 中同时缓存 `GOCACHE`（例如 `actions/setup-go` 的默认缓存）可以缩短冷分析时间。
 
 默认目录来自 Go 的 `os.UserCacheDir`：
 
@@ -189,6 +200,6 @@ RIPPLES_CACHE=/absolute/path/to/cache ripples \
 - Go module 在 Git 仓库中的相对目录
 - ripples 分析格式版本和编译 ripples 的 Go 版本（`go/types` 版本）
 - `go env` 报告的实际生效值：`GOOS`、`GOARCH`、`CGO_ENABLED`、`GOFLAGS`、`GOEXPERIMENT`、`GOVERSION`、`GOTOOLCHAIN`、`GOWORK` 和 `GOAMD64` 等架构级别；环境变量和 `go env -w` 写入的设置都会生效
-- `-prepare` 命令
+- `-prepare` 命令和 `-tests`
 
 snapshot 包含当前构建中的声明依赖图、package 内容哈希，以及本地 package 到第三方 module 的依赖关系。module 信息和声明图来自同一次导出，保证两者描述同一个 Git tree。

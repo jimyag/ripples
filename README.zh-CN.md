@@ -58,8 +58,8 @@ ripples 也可以生成影响关系图，展示变更如何沿 package 引用关
 
 - **声明级分析**：识别函数、方法、类型、字段、变量、常量和 `init` 的新增、删除与修改。
 - **直接与间接传播**：沿实际声明引用和调用关系反向查找受影响 package。
-- **接口转换**：把值转换为接口的声明依赖该类型的方法和字段布局，依赖注入、注册表以及 `fmt`、`encoding/json` 的动态调用都能传播，也不会混入其他位置注入的实现。
-- **Go 常见语法覆盖**：支持函数值、闭包、容器、类型断言、泛型（含泛型类型的方法）、嵌入字段、测试、`go`、`defer` 和初始化关系。
+- **接口转换**：把值转换为接口的声明依赖该类型可能被动态调用的方法和字段布局，依赖注入、注册表以及 `fmt`、`encoding/json` 的动态调用都能传播，也不会混入其他位置注入的实现；只有部分 binary 经接口调用的方法，只影响这些 binary。
+- **Go 常见语法覆盖**：支持函数值、闭包、容器、类型断言、泛型（含泛型类型的方法）、嵌入字段、测试（`-tests`）、`go`、`defer` 和初始化关系。
 - **构建输入感知**：识别 build tags、CGo、汇编和 C 源文件、`//go:` 指令、`go:embed`、`go.mod` 和 `go.work` 的有效变化。
 - **适合 CI**：稳定排序输出，支持持久缓存、JSON、摘要和 DOT 关系图。
 
@@ -76,7 +76,7 @@ ripples --version
 
 也可以从 [GitHub Release](https://github.com/jimyag/ripples/releases/latest) 下载 Linux、macOS 和 Windows 的 amd64/arm64 原始二进制。
 
-分析目标项目时仍需要 `git`、匹配项目的 Go toolchain，以及能够执行 `go list -test ./...` 的 Go module。平台二进制下载命令和完整运行要求见[安装与使用](docs/usage.md)。
+分析目标项目时仍需要 `git`、匹配项目的 Go toolchain，以及能够执行 `go list ./...` 的 Go module（指定 `-tests` 时为 `go list -test ./...`）。平台二进制下载命令和完整运行要求见[安装与使用](docs/usage.md)。
 
 ## 快速开始
 

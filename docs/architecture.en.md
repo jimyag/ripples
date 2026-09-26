@@ -46,7 +46,11 @@ The core data structures are defined in [`internal/impact/snapshot.go`](../inter
 | `Package` | Package path, name, and content hash; analysis results also mark deleted packages |
 | `Symbol` | Stable declaration ID, semantic hash, package path, and dependency IDs |
 
-`buildPackageSnapshot` first runs the optional `-prepare` command, then loads `./...` with `Tests: true` through `golang.org/x/tools/go/packages`, requesting local ASTs, type information, imports, module metadata, embed files, and other compiler inputs without `NeedDeps`. Standard-library and third-party packages therefore remain type/import contracts whose function bodies are not traversed. The current Go toolchain, `GOOS`, `GOARCH`, build tags, and CGo configuration select the compiled files.
+`buildPackageSnapshot` first runs the optional `-prepare` command, then loads `./...` through `golang.org/x/tools/go/packages`, requesting local ASTs, type information, imports, module metadata, embed files, and other compiler inputs without `NeedDeps`. Standard-library and third-party packages therefore remain type/import contracts whose function bodies are not traversed. The current Go toolchain, `GOOS`, `GOARCH`, build tags, and CGo configuration select the compiled files.
+
+`Tests: true` is set only with `-tests`. The default result drives builds and deployments, which do not need test files; tests are often larger than the non-test code, and loading them makes cold analyses noticeably slower. `-tests` is part of the cache key, so the two modes never share snapshots.
+
+go/packages makes `go list -export` compile export data for every listed package, including the local packages that are then type-checked from source. Loading passes `-trimpath`: otherwise the Go build cache keys that output by package directory, and since every export uses a new temporary directory, every analysis recompiled the whole module into new cache entries; with it, unchanged packages hit the build cache across runs and trees. `-trimpath` only changes the paths recorded in the `//line` directives of cgo-generated files (to module-path form), which are equally stable across exports.
 
 Loading tests returns several variants of a package: the plain package `p`, `p [p.test]` including its `_test.go` files, the external test package `p_test [p.test]`, and dependencies recompiled for the test such as `q [p.test]`. The generated test main is dropped; every other variant is analyzed:
 
@@ -85,7 +89,7 @@ Base dependencies come from `types.Info` and are collected by `addReferenceDepen
 - Local objects referenced through `Uses`. Methods and fields of instantiated generics map back to the generic declaration through `Origin()`.
 - Embedded fields on the index path of a `Selections` entry, so replacing an embedded type reaches users of the promoted fields and methods.
 - Unkeyed struct literals depend on the layout symbol of their type.
-- Contracts of the type arguments recorded in `Instances`.
+- Contracts of the type arguments when calling a generic function (an `Instances` entry whose object is a function) or selecting a method of an instantiated generic type. Merely naming an instantiated type runs no generic code and adds no such dependency.
 
 Additional Go semantics are then added:
 
@@ -99,17 +103,20 @@ Dependencies are stored as sorted ID sets so snapshots and output remain stable.
 
 The implementation lives in [`internal/impact/contract.go`](../internal/impact/contract.go). [ADR-0001](adr/0001-interface-conversion-contracts.md) (Chinese) records why this approach was chosen over hand-written value flow or VTA.
 
-Every package-level named non-interface type has two synthetic symbols:
+Every package-level named non-interface type has three synthetic symbols:
 
 - layout: hashed from `types.TypeString` of the underlying type, covering field order, types, and tags.
 - contract: depends on the layout, every method in the method set of `*T` (including promoted methods), and the contracts of local named types used in its fields and elements.
+- dispatch: depends on the layout, the methods in the method set of `*T` that can be invoked dynamically anywhere, and the dispatch symbols of local named types used in its fields and elements. Methods that only local code calls through interfaces are recorded in `Symbol.Dynamic` as conditional dependencies together with the calling declarations.
 
-`addConversionDependencies` builds SSA for the local packages with the official `golang.org/x/tools/go/ssa` package; dependencies get type-only packages from export data and no function bodies. SSA makes every implicit conversion explicit as `MakeInterface`:
+`collectDynamicMethods` walks the syntax of every local declaration and collects, by method ID, the interfaces that can invoke a method dynamically: interface-receiver methods in `TypesInfo.Uses` (only the method called, with the declaration making the call as its caller) and every method of interfaces in type assertions and type switches; it also collects every method of interface types in the scopes of transitive dependencies, and `error`. Method m of `*T` matches a recorded interface J exactly when J contains m with a `types.Identical` signature and `types.Implements(*T, J)` holds. Methods of generic types and interfaces that mention type parameters match by name, because implementation cannot be decided before instantiation. If any matching record has no caller (type assertions, dependency interfaces), or m is named `Unwrap`, `Is`, `As`, `Timeout`, or `Temporary` (which the standard library checks through anonymous interfaces), m is a plain dependency of dispatch; otherwise all calling declarations are recorded as a conditional dependency. [ADR-0002](adr/0002-dispatch-contracts.md) (Chinese) records the trade-offs.
+
+`addConversionDependencies` builds SSA for the local packages with the official `golang.org/x/tools/go/ssa` package; only the direct imports of local packages get type-only packages from export data (SSA creates methods of indirect dependencies on demand), and no dependency function bodies are built. Local packages are built concurrently, one package per worker, and each package's function bodies are scanned and dropped right after it is built, so only the SSA bodies of packages in flight are in memory at once. SSA makes every implicit conversion explicit as `MakeInterface`:
 
 - Conversions in functions and methods, including closures, belong to the enclosing declaration.
 - Package variable initializers are compiled into the synthetic package initializer. A conversion belongs to the global it is stored into; otherwise it is placed by the position of the instruction consuming the value within an initializer's source range; if neither works it falls back to package-init, which is conservative.
 
-The converting declaration depends on the contract of the converted type and of the local named types inside its composite types and type arguments. No value-flow tracking is needed: wherever the interface value flows afterwards (setters, functional options, registries, embedded fields, external `any` parameters such as `fmt` and `encoding/json`), the impact lands on the declaration that performed the conversion, and analysis time grows linearly with the code. The cost is that a conversion site depends on every method of the type, not only those the interface declares.
+The converting declaration depends on a contract of the converted type and of the local named types inside its composite types and type arguments: contract when the target is the empty interface or implements `error`, dispatch otherwise. No value-flow tracking is needed: wherever the interface value flows afterwards (setters, functional options, registries, embedded fields, external parameters such as `fmt` and `encoding/json`), the impact propagates from the conversion site, and analysis time grows linearly with the code. Conditional dependencies are resolved per package during reverse propagation, described in the next section.
 
 ## 5. Module and Build-Configuration Changes
 
@@ -127,30 +134,30 @@ The main algorithm is in [`internal/impact/analyzer.go`](../internal/impact/anal
 
 1. `changedSymbols` compares old/new symbol IDs and hashes to find additions, removals, and modifications.
 2. `reverseDependencies` merges old/new local declaration edges and reverses them from dependency to dependent.
-3. `transitiveDependents` performs one breadth-first traversal from all changed roots; the `affected` set deduplicates results and converging paths.
+3. `transitiveDependents` propagates along plain edges from all changed roots; the `affected` set deduplicates results and converging paths. When an affected declaration is the method of a conditional dependency, it computes two reverse closures, counting conditional dependencies as plain edges as a conservative approximation: declarations reaching that dispatch symbol (the conversion side), and the calling declarations together with the declarations reaching them (the call side). Only in packages present on both sides are the declarations of either side marked; they do not propagate further along plain edges, because their users only run the method if their own packages meet both sides too. The sides meet per package rather than per declaration because package initialization and `main` are declarations of one binary that do not reference each other. Closures are cached by starting point.
 4. Symbols are collapsed into packages and sorted by relative path, package name, and full path; packages that exist only in the old revision are marked `Deleted`.
 
 Merging both graphs is what makes additions and removals correct: removals use call edges that still exist in the old graph, while additions use edges from the new graph. Reading only the current working tree or only one snapshot would lose relationships from the other side.
 
-`AnalyzeDetailed` also collapses declaration edges into cross-package edges used by DOT output.
+`AnalyzeDetailed` also collapses declaration edges into cross-package edges used by DOT output; declarations marked through a conditional dependency hang off the method that triggered them, which keeps the graph connected.
 
 ## 7. Cache
 
-[`internal/snapshot/cache.go`](../internal/snapshot/cache.go) implements a content-addressed, gzip-compressed JSON cache; snapshots are written to `package-snapshots/<key>.json.gz`. Snapshots repeat long declaration IDs, so compression shrinks them to about one sixth.
+[`internal/snapshot/cache.go`](../internal/snapshot/cache.go) implements a content-addressed, gzip-compressed JSON cache. Each tree's snapshot is split into a manifest and chunks: `snapshots/<key>.json.gz` only records the tree, module path, and chunk keys; `snapshot-chunks/<content hash>.json.gz` holds one chunk per package (package metadata, its module dependencies, and all of its symbols) plus one chunk for module checksums. Chunks are keyed by content hash, so unchanged packages share one chunk across trees and caching another commit only adds the chunks of the packages it changed. A missing chunk turns the entry into a miss, which rebuilds the snapshot.
 
-Analysis keys contain the analysis format version, graph kind, Git tree, repository-relative module directory, the Go version ripples was built with, the effective build configuration reported by `go env -json` (run outside any module, so it includes environment variables and `go env -w` settings), and the `-prepare` command.
+Analysis keys contain the analysis format version, graph kind, Git tree, repository-relative module directory, the Go version ripples was built with, the effective build configuration reported by `go env -json` (run outside any module, so it includes environment variables and `go env -w` settings), the `-prepare` command, and `-tests`.
 
-A cache hit avoids exporting the tree and refreshes the entry's modification time. After every analysis, `Prune` removes entries that were not read or written for 7 days. A corrupt or unreadable entry falls back to rebuilding; a write failure is returned so the caller does not mistake an unpersisted result for a successful cache write. Entries are written to temporary files and atomically committed with rename.
+A cache hit avoids exporting the tree and refreshes the entry's modification time. After every analysis, `Prune` first removes entries that were not read or written for 7 days; while the total size still exceeds `MaxBytes` (1024 MB by default, overridden by `RIPPLES_CACHE_MAX_MB`), it removes entries from the oldest modification time on. A corrupt or unreadable entry falls back to rebuilding; a write failure is returned so the caller does not mistake an unpersisted result for a successful cache write. Entries are written to temporary files and atomically committed with rename.
 
 Changes to the snapshot schema or analysis semantics must increment `analysisVersion`; changes to the generic cache encoding must increment `cacheVersion`.
 
 ## 8. Concurrency and Memory Boundaries
 
-[`internal/impact/concurrency.go`](../internal/impact/concurrency.go) implements `parallelFor` with at most `GOMAXPROCS` workers and stores errors by input index. It handles old/new revisions, package summaries, declaration hashes, and base dependencies; `ssa.Program.Build` builds SSA concurrently.
+[`internal/impact/concurrency.go`](../internal/impact/concurrency.go) implements `parallelFor` with at most `GOMAXPROCS` workers and stores errors by input index. It resolves old/new revisions and handles package summaries, declaration hashes, base dependencies, and building and scanning SSA one package at a time.
 
-Old and new package snapshots are also loaded concurrently. Each declaration is summarized once per snapshot. The propagation phase uses one shared `affected` set, so multiple changes converging on one declaration do not traverse that declaration repeatedly.
+Old and new package snapshots are loaded one after the other: building one snapshot already uses every CPU, and building both at once only doubles peak memory, while cache hits are fast enough that the order costs nothing. Each declaration is summarized once per snapshot. The propagation phase uses one shared `affected` set, so multiple changes converging on one declaration do not traverse that declaration repeatedly.
 
-The primary package graph omits third-party `NeedDeps`, and persisted snapshots contain neither ASTs nor SSA. A cold analysis holds the current module's ASTs, type information, and SSA, including test variants.
+The primary package graph omits third-party `NeedDeps`, and persisted snapshots contain neither ASTs nor SSA. The peak memory of a cold analysis comes from holding the current module's ASTs, `types.Info`, and dependency type information at once, including test variants with `-tests`; SSA functions keep referencing their syntax and their package's `types.Info`, so this data cannot be released before scanning ends. A cold analysis of a module with about 3,000 Go files keeps about 400–500 MB live.
 
 ## 9. Code and Test Map
 

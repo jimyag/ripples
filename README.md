@@ -58,8 +58,8 @@ ripples can also generate an impact graph that shows how a change propagates thr
 
 - **Declaration-level analysis**: detects added, removed, and modified functions, methods, types, fields, variables, constants, and `init` functions.
 - **Direct and transitive propagation**: walks actual declaration references and call relationships in reverse.
-- **Interface conversions**: a declaration that converts a value to an interface depends on that type's methods and layout, so dependency injection, registries, and dynamic calls from `fmt` or `encoding/json` propagate without mixing in implementations injected elsewhere.
-- **Common Go syntax coverage**: follows function values, closures, containers, type assertions, generics including methods of generic types, embedded fields, tests, `go`, `defer`, and initialization relationships.
+- **Interface conversions**: a declaration that converts a value to an interface depends on that type's dynamically callable methods and layout, so dependency injection, registries, and dynamic calls from `fmt` or `encoding/json` propagate without mixing in implementations injected elsewhere, while a method that only some binaries call through an interface affects only those binaries.
+- **Common Go syntax coverage**: follows function values, closures, containers, type assertions, generics including methods of generic types, embedded fields, tests (`-tests`), `go`, `defer`, and initialization relationships.
 - **Build input awareness**: detects effective changes to build tags, CGo, assembly and C sources, `//go:` directives, `go:embed`, `go.mod`, and `go.work`.
 - **CI-friendly output**: emits stable sorted results with persistent caching, JSON, summaries, and DOT graphs.
 
@@ -76,7 +76,7 @@ ripples --version
 
 You can also download raw amd64 and arm64 binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/jimyag/ripples/releases/latest).
 
-Analyzing a target project still requires `git`, a compatible Go toolchain, and a Go module where `go list -test ./...` succeeds. See [Installation and Usage](docs/usage.en.md) for platform download commands and complete runtime requirements.
+Analyzing a target project still requires `git`, a compatible Go toolchain, and a Go module where `go list ./...` succeeds (`go list -test ./...` with `-tests`). See [Installation and Usage](docs/usage.en.md) for platform download commands and complete runtime requirements.
 
 ## Quick Start
 

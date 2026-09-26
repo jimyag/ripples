@@ -91,7 +91,7 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 		return nil, err
 	}
 	addInitializationDependencies(localPackages, declarations, objectIDs, symbols)
-	addTypeContractSymbols(objectIDs, reportPaths, symbols)
+	addTypeContractSymbols(objectIDs, reportPaths, collectDynamicMethods(localPackages, declarations), symbols)
 	addConversionDependencies(localPackages, declarations, objectIDs, symbols)
 	return symbols, nil
 }
@@ -99,7 +99,10 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 // addReferenceDependencies records the local declarations a node statically
 // depends on: referenced objects, the embedded fields a promoted selection
 // passes through, the layout behind unkeyed struct literals and the
-// contracts of the type arguments it instantiates generics with.
+// contracts of the type arguments of the generic code it runs. Calling a
+// generic function or a method of an instantiated generic type runs generic
+// code that may call methods of the type arguments; merely naming an
+// instantiated type runs nothing.
 func addReferenceDependencies(
 	info *types.Info,
 	root ast.Node,
@@ -113,13 +116,26 @@ func addReferenceDependencies(
 				dependencies[id] = struct{}{}
 			}
 			if instance, ok := info.Instances[node]; ok {
-				for argument := range instance.TypeArgs.Types() {
-					addContractDependencies(argument, objectIDs, dependencies)
+				if _, function := info.Uses[node].(*types.Func); function {
+					for argument := range instance.TypeArgs.Types() {
+						addContractDependencies(argument, "contract", objectIDs, dependencies)
+					}
 				}
 			}
 		case *ast.SelectorExpr:
 			if selection := info.Selections[node]; selection != nil {
 				addEmbeddedPathDependencies(selection, objectIDs, dependencies)
+				if method, ok := selection.Obj().(*types.Func); ok {
+					receiver := method.Signature().Recv().Type()
+					if pointer, ok := receiver.(*types.Pointer); ok {
+						receiver = pointer.Elem()
+					}
+					if named, ok := types.Unalias(receiver).(*types.Named); ok {
+						for argument := range named.TypeArgs().Types() {
+							addContractDependencies(argument, "contract", objectIDs, dependencies)
+						}
+					}
+				}
 			}
 		case *ast.CompositeLit:
 			if len(node.Elts) == 0 {

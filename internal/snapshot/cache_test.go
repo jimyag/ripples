@@ -74,6 +74,30 @@ func TestCacheCompressesEntries(t *testing.T) {
 	}
 }
 
+func TestCacheTouchRefreshesExistingEntries(t *testing.T) {
+	cache := &Cache{Dir: t.TempDir()}
+	if cache.Touch("chunks", "missing") {
+		t.Fatal("Touch(missing) = true, want false")
+	}
+	if err := cache.Store("chunks", "key", "value"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(cache.filename("chunks", "key"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if !cache.Touch("chunks", "key") {
+		t.Fatal("Touch(existing) = false, want true")
+	}
+	info, err := os.Stat(cache.filename("chunks", "key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().After(old.Add(time.Minute)) {
+		t.Fatalf("Touch() left modification time at %v", info.ModTime())
+	}
+}
+
 func TestCachePrunesEntriesUnusedForMaxAge(t *testing.T) {
 	cache := &Cache{Dir: t.TempDir()}
 	for _, key := range []string{"stale", "fresh", "read"} {
@@ -99,6 +123,55 @@ func TestCachePrunesEntriesUnusedForMaxAge(t *testing.T) {
 		if hit, err := cache.Load("snapshots", key, &value); err != nil || hit != want {
 			t.Errorf("Load(%s) after Prune() = %v, %v; want hit %v", key, hit, err, want)
 		}
+	}
+}
+
+func TestCachePruneEvictsLeastRecentlyUsedEntriesOverMaxSize(t *testing.T) {
+	cache := &Cache{Dir: t.TempDir()}
+	keys := []string{"a", "b", "c", "d", "e"}
+	now := time.Now()
+	var entrySize int64
+	for index, key := range keys {
+		if err := cache.Store("snapshots", key, key); err != nil {
+			t.Fatal(err)
+		}
+		used := now.Add(time.Duration(index-len(keys)) * time.Minute)
+		if err := os.Chtimes(cache.filename("snapshots", key), used, used); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(cache.filename("snapshots", key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entrySize = max(entrySize, info.Size())
+	}
+	cache.MaxBytes = 2 * entrySize
+
+	if err := cache.Prune(7 * 24 * time.Hour); err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	var value string
+	for index, key := range keys {
+		want := index >= len(keys)-2
+		if hit, err := cache.Load("snapshots", key, &value); err != nil || hit != want {
+			t.Errorf("Load(%s) = %v, %v; want hit %v", key, hit, err, want)
+		}
+	}
+}
+
+func TestDefaultCacheReadsMaxSize(t *testing.T) {
+	t.Setenv("RIPPLES_CACHE", t.TempDir())
+	cache, err := DefaultCache()
+	if err != nil || cache.MaxBytes != 1024<<20 {
+		t.Fatalf("DefaultCache().MaxBytes = %d, %v; want 1 GiB", cache.MaxBytes, err)
+	}
+	t.Setenv("RIPPLES_CACHE_MAX_MB", "64")
+	if cache, err = DefaultCache(); err != nil || cache.MaxBytes != 64<<20 {
+		t.Fatalf("DefaultCache().MaxBytes = %d, %v; want 64 MiB", cache.MaxBytes, err)
+	}
+	t.Setenv("RIPPLES_CACHE_MAX_MB", "lots")
+	if _, err = DefaultCache(); err == nil {
+		t.Fatal("DefaultCache() accepted an invalid RIPPLES_CACHE_MAX_MB")
 	}
 }
 

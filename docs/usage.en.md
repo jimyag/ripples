@@ -62,7 +62,7 @@ ripples also requires:
 
 - `git`, to resolve revisions and export trees into temporary directories through a private index. No worktree is registered and no repository hook runs.
 - A Go toolchain, to load the target repository according to its `go.mod`, build constraints, and current environment.
-- A Go module directory passed through `-repo` where `go list -test ./...` succeeds, so test files must compile too. Generate code that the repository does not commit with `-prepare`.
+- A Go module directory passed through `-repo` where `go list ./...` succeeds; with `-tests`, `go list -test ./...` must succeed, so test files must compile too. Generate code that the repository does not commit with `-prepare`.
 
 Even when using a prebuilt release binary, the target project still requires a compatible Go toolchain for analysis. ripples also type-checks source using the Go version built into its binary, which must support the Go version declared by both revisions. Check the binary's `goVersion` with `ripples --version`, and update the release when the target project moves to a newer Go minor version. You do not need to build the release yourself.
 
@@ -97,6 +97,12 @@ When the repository relies on generated code that it does not commit (protobuf, 
 ripples -repo . -old origin/main -new HEAD -prepare 'go generate ./...'
 ```
 
+`_test.go` files are not analyzed by default: builds and deployments do not need them, and cold analyses are faster. Add `-tests` when test jobs are selected by impact, so a commit that only changes tests still reports the package under test:
+
+```bash
+ripples -repo . -old origin/main -new HEAD -tests
+```
+
 ### Options
 
 | Option | Description | Default |
@@ -106,6 +112,7 @@ ripples -repo . -old origin/main -new HEAD -prepare 'go generate ./...'
 | `-new` | New commit ID or ref | required |
 | `-output` | `simple`, `json`, `text`, `summary`, or `dot`; validated before analysis | `simple` |
 | `-prepare` | Shell command run in each exported revision's module directory before analysis | empty |
+| `-tests` | Also analyze `_test.go` files and report packages whose tests alone changed | `false` |
 | `-verbose` | Print the affected package count and elapsed time to stderr | `false` |
 
 ## Output Formats
@@ -164,7 +171,11 @@ Generating DOT text does not require Graphviz. The `dot` command is only needed 
 
 ## Cache
 
-ripples builds content-addressed cache keys from the Git tree, analysis format version, Go toolchain, and effective build configuration. Repeated analyses of the same tree and configuration reuse the package snapshot. After every analysis, entries that have not been read or written for 7 days are removed; snapshots in regular use, such as the main branch, stay.
+ripples builds content-addressed cache keys from the Git tree, analysis format version, Go toolchain, and effective build configuration. Repeated analyses of the same tree and configuration reuse the package snapshot. After every analysis, entries that have not been read or written for 7 days are removed first; if the cache still exceeds its size limit, the least recently used entries are removed until it fits. Snapshots in regular use, such as the main branch, stay.
+
+The limit defaults to 1024 MB and can be changed with `RIPPLES_CACHE_MAX_MB`. Snapshots are split into per-package chunks deduplicated by content hash and gzip-compressed, so unchanged packages share one copy across commits. For a repository with about 3,000 Go files, 50 consecutive commits take about 30 MB, compared with about 140 MB when every tree is stored whole.
+
+ripples obtains dependency type information through `go list -export`, which writes compiled output to the Go build cache (`GOCACHE`). Unchanged packages are reused by later analyses, and Go automatically removes entries unused for 5 days. Caching `GOCACHE` in CI as well (for example with the default cache of `actions/setup-go`) shortens cold analyses.
 
 The default location comes from Go's `os.UserCacheDir`:
 
@@ -189,6 +200,6 @@ Cache keys include:
 - Go module path relative to the Git repository root
 - ripples analysis format version and the Go version ripples was built with (the `go/types` version)
 - Effective values reported by `go env`: `GOOS`, `GOARCH`, `CGO_ENABLED`, `GOFLAGS`, `GOEXPERIMENT`, `GOVERSION`, `GOTOOLCHAIN`, `GOWORK`, and architecture levels such as `GOAMD64`; both environment variables and settings written with `go env -w` count
-- The `-prepare` command
+- The `-prepare` command and `-tests`
 
 A snapshot contains the declaration dependency graph for the current build, package content hashes, and the mapping from local packages to third-party modules. Module information and the declaration graph come from the same export, so both always describe one Git tree.

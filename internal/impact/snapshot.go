@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -11,6 +12,7 @@ import (
 	"go/token"
 	"go/types"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,9 +53,130 @@ type Symbol struct {
 	PackagePath  string   `json:"package_path"`
 	Hash         string   `json:"hash"`
 	Dependencies []string `json:"dependencies,omitempty"`
+	// Dynamic lists the methods of a dispatch contract that only interface
+	// calls in local declarations invoke.
+	Dynamic []DynamicDependency `json:"dynamic,omitempty"`
 }
 
-func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare string) (PackageSnapshot, error) {
+// DynamicDependency is a method that only the Callers declarations invoke,
+// through interfaces. Converting the method's type affects a package only if
+// the package also reaches one of those declarations.
+type DynamicDependency struct {
+	ID      string   `json:"id"`
+	Callers []string `json:"callers"`
+}
+
+// Snapshots are cached as a manifest per tree listing content-addressed
+// chunks: one per package with its symbols and module dependencies, and one
+// with the module checksums. Trees share the chunks of unchanged packages,
+// so caching another commit only adds the chunks of the packages it changed.
+const (
+	manifestNamespace = "snapshots"
+	chunkNamespace    = "snapshot-chunks"
+)
+
+type snapshotManifest struct {
+	Tree       string   `json:"tree"`
+	ModulePath string   `json:"module_path"`
+	Chunks     []string `json:"chunks"`
+}
+
+// snapshotChunk holds one package, or the module checksums when Path is empty.
+type snapshotChunk struct {
+	Path       string            `json:"path,omitempty"`
+	Package    *Package          `json:"package,omitempty"`
+	Modules    *packageModules   `json:"modules,omitempty"`
+	Symbols    []Symbol          `json:"symbols,omitempty"`
+	GlobalHash string            `json:"global_hash,omitempty"`
+	Sums       map[string]string `json:"sums,omitempty"`
+}
+
+func storeSnapshot(cache *snapshot.Cache, key string, result *PackageSnapshot) error {
+	byPath := make(map[string]*snapshotChunk)
+	chunkFor := func(path string) *snapshotChunk {
+		if byPath[path] == nil {
+			byPath[path] = &snapshotChunk{Path: path}
+		}
+		return byPath[path]
+	}
+	for path, pkg := range result.Packages {
+		chunkFor(path).Package = &pkg
+	}
+	for path, modules := range result.Modules.Packages {
+		chunkFor(path).Modules = &modules
+	}
+	for _, symbol := range result.Symbols {
+		chunk := chunkFor(symbol.PackagePath)
+		chunk.Symbols = append(chunk.Symbols, symbol)
+	}
+	chunks := []*snapshotChunk{{GlobalHash: result.Modules.GlobalHash, Sums: result.Modules.Sums}}
+	for _, path := range slices.Sorted(maps.Keys(byPath)) {
+		chunk := byPath[path]
+		slices.SortFunc(chunk.Symbols, func(a, b Symbol) int { return strings.Compare(a.ID, b.ID) })
+		chunks = append(chunks, chunk)
+	}
+
+	manifest := snapshotManifest{Tree: result.Tree, ModulePath: result.ModulePath}
+	for _, chunk := range chunks {
+		encoded, err := json.Marshal(chunk)
+		if err != nil {
+			return fmt.Errorf("encode snapshot chunk: %w", err)
+		}
+		chunkKey := snapshot.Key(string(encoded))
+		manifest.Chunks = append(manifest.Chunks, chunkKey)
+		if !cache.Touch(chunkNamespace, chunkKey) {
+			if err := cache.Store(chunkNamespace, chunkKey, json.RawMessage(encoded)); err != nil {
+				return err
+			}
+		}
+	}
+	return cache.Store(manifestNamespace, key, manifest)
+}
+
+// loadCachedSnapshot reports a miss when the manifest or any of its chunks is
+// missing or unreadable, so a partially pruned entry is rebuilt.
+func loadCachedSnapshot(cache *snapshot.Cache, key string) (*PackageSnapshot, bool) {
+	var manifest snapshotManifest
+	if hit, err := cache.Load(manifestNamespace, key, &manifest); err != nil || !hit || len(manifest.Chunks) == 0 {
+		return nil, false
+	}
+	result := &PackageSnapshot{
+		Tree:       manifest.Tree,
+		ModulePath: manifest.ModulePath,
+		Modules:    moduleSnapshot{Packages: make(map[string]packageModules)},
+		Packages:   make(map[string]Package),
+		Symbols:    make(map[string]Symbol),
+		Cached:     true,
+	}
+	chunks := make([]snapshotChunk, len(manifest.Chunks))
+	if err := parallelFor(len(chunks), func(index int) error {
+		hit, err := cache.Load(chunkNamespace, manifest.Chunks[index], &chunks[index])
+		if err == nil && !hit {
+			err = os.ErrNotExist
+		}
+		return err
+	}); err != nil {
+		return nil, false
+	}
+	for _, chunk := range chunks {
+		if chunk.Path == "" {
+			result.Modules.GlobalHash, result.Modules.Sums = chunk.GlobalHash, chunk.Sums
+			continue
+		}
+		if chunk.Package != nil {
+			result.Packages[chunk.Path] = *chunk.Package
+		}
+		if chunk.Modules != nil {
+			result.Modules.Packages[chunk.Path] = *chunk.Modules
+		}
+		for _, symbol := range chunk.Symbols {
+			result.Symbols[symbol.ID] = symbol
+		}
+	}
+	return result, true
+}
+
+func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare string, tests bool) (PackageSnapshot, error) {
 	if err := runPrepare(ctx, source.Dir, prepare); err != nil {
 		return PackageSnapshot{}, err
 	}
@@ -73,10 +196,15 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare 
 			gopackages.NeedTypes |
 			gopackages.NeedTypesInfo |
 			gopackages.NeedForTest,
-		// Test variants and external test packages are analyzed so test-only
-		// changes and declarations used by tests reach their packages.
-		Tests:     true,
-		ParseFile: parseAnalysisFile,
+		// With tests, test variants and external test packages are analyzed so
+		// test-only changes and declarations used by tests reach their packages.
+		Tests: tests,
+		// go list compiles export data for every listed package. Without
+		// -trimpath the build cache keys that output by the export directory,
+		// so every run recompiled the whole module into new cache entries;
+		// with it, unchanged packages hit the cache across runs and trees.
+		BuildFlags: []string{"-trimpath"},
+		ParseFile:  parseAnalysisFile,
 	}
 	loaded, err := gopackages.Load(cfg, "./...")
 	if err != nil {
