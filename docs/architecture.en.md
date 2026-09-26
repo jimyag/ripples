@@ -27,14 +27,14 @@ The entry point is [`main.go`](../main.go). The main algorithm is `AnalyzeDetail
 
 ## 1. Revisions and Isolated Exports
 
-In [`internal/snapshot/source.go`](../internal/snapshot/source.go), `Resolve` uses `git rev-parse --verify` to resolve the commit and tree and records the module directory relative to the Git root. `OpenRevision` runs `git read-tree` and `git checkout-index --all --prefix` against a private index named by `GIT_INDEX_FILE`, exporting the complete tree into a temporary directory:
+In [`internal/snapshot/source.go`](../internal/snapshot/source.go), `Resolve` uses `git rev-parse --verify` to resolve the commit and tree and records the module directory relative to the Git root. `OpenRevision` runs `git read-tree` against a private index named by `GIT_INDEX_FILE` and then `git checkout-index --stdin --prefix` to export the complete tree into a temporary directory. Writing thousands of files is bound by file-system calls, so every directory is created first and the files are split by directory across up to 8 `checkout-index` processes writing in parallel; files whose directories differ only in case share a process, so case-insensitive file systems still resolve such collisions in index order:
 
 - No worktree is registered and the repository's own index is untouched, so an interrupted run leaves nothing in `.git`.
 - `checkout-index` runs no hooks.
 - `-c core.sparseCheckout=false` exports the whole tree even when the user's repository uses sparse checkout.
 - `GIT_LFS_SKIP_SMUDGE=1` keeps LFS files as pointers; analysis never needs their content.
 
-The export preserves the repository layout, so same-repository local `replace` targets and a `go.work` in a parent directory remain valid. Every export uses its own index, so old and new can be exported concurrently. `Source.Close` removes the temporary directory. If old and new resolve to the same Git tree, ripples builds only one package snapshot.
+The export preserves the repository layout, so same-repository local `replace` targets and a `go.work` in a parent directory remain valid. Every export uses its own index, so old and new can be exported concurrently. `Source.Close` removes the top-level directories concurrently and then the temporary directory; the analysis runs the removal in the background while it stores the snapshot and analyzes the other revision, and waits for it, reporting errors, before returning. If old and new resolve to the same Git tree, ripples builds only one package snapshot.
 
 ## 2. PackageSnapshot
 
@@ -51,6 +51,8 @@ The core data structures are defined in [`internal/impact/snapshot.go`](../inter
 1. `golang.org/x/tools/go/packages` reads metadata: files, the import graph, modules, embed files, test variants, and type sizes. No types are requested, so `go list` runs without `-export` and compiles nothing.
 2. The packages matching `./...` and the test variants they use are type-checked from source; every other package is a dependency, and a second go/packages load reads export data for those only. `go list -export` compiles just these dependencies, once per version, after which the Go build cache reuses them; dependencies loaded together share type objects. Standard-library and third-party packages therefore remain type contracts whose function bodies are not traversed.
 3. Local packages are type-checked concurrently with `go/types` in import order, and a file shared by test variants is parsed once. Variants recompiled only for tests, which are not analyzed, skip function bodies.
+
+Reading the metadata and preparing the dependencies' export data each take `go list` about a second, so both run at once. Loading starts by parsing the module's Go files concurrently (skipping `vendor`, `testdata`, directories starting with `.` or `_`, nested modules, and test files without `-tests`), takes their imports outside the module as a guess of the dependencies, and immediately loads that export data. Once the metadata arrives, the actual dependencies are checked against the guess; if the guess missed any or a guessed package has errors, it is discarded and the actual dependencies are loaded again, so all dependency types come from one load. The files parsed up front go into the same parse cache that type checking reuses.
 
 When go/packages type-checks by itself, `go list -export` also compiles the local packages, which are then checked from source anyway. In a repository with about 3,000 Go files that compilation took most of the cold analysis time and kept growing the Go build cache, so go/packages now only provides metadata and dependency export data. Both `go list` runs pass `-trimpath`, which makes cgo output and compiled dependencies independent of the export directory so they are reused across runs and trees; `-trimpath` only changes the paths recorded in the `//line` directives of cgo-generated files (to module-path form), which are equally stable across exports. The current Go toolchain, `GOOS`, `GOARCH`, build tags, and CGo configuration select the compiled files.
 
@@ -79,7 +81,7 @@ Regular identities contain the package path, declaration kind, and name. Methods
 
 ### Semantic Hashes
 
-- Regular declarations are hashed through `ast.Fprint`, filtering source positions, ordinary comments, and parser-internal object links; constants use their complete type and exact value.
+- Regular declarations are hashed by [`internal/impact/asthash.go`](../internal/impact/asthash.go), which walks the syntax tree through reflection and writes the type of every node and the values of its other fields, filtering source positions, ordinary comments, and parser-internal object links. It covers the same fields as `ast.Fprint` but writes compact binary data instead of formatted text, which is an order of magnitude faster. Only two position fields carry meaning and are recorded as present or absent: the `...` of a call (`f(xs...)` versus `f(xs)`) and the `=` of a type alias (`type A = B` versus `type A B`). Constants use their complete type and exact value.
 - Struct fields and interface methods are separate symbols, so a member change does not automatically contaminate every user of the enclosing type.
 - [`internal/impact/buildmeta.go`](../internal/impact/buildmeta.go) adds CGo preambles and build-affecting `//go:` directives to the hash.
 - [`internal/impact/embed.go`](../internal/impact/embed.go) creates content-hash symbols for `go:embed` files and connects them to their variables.
@@ -157,11 +159,22 @@ Changes to the snapshot schema or analysis semantics must increment `analysisVer
 
 ## 8. Concurrency and Memory Boundaries
 
-[`internal/impact/concurrency.go`](../internal/impact/concurrency.go) implements `parallelFor` with at most `GOMAXPROCS` workers and stores errors by input index. It resolves old/new revisions and handles package summaries, declaration hashes, base dependencies, and building and scanning SSA one package at a time.
+[`internal/impact/concurrency.go`](../internal/impact/concurrency.go) implements `parallelFor` with at most `GOMAXPROCS` workers and stores errors by input index. It resolves old/new revisions and handles parsing the module ahead of the metadata, package summaries, declaration hashes and base dependencies, dynamic-method collection, type contracts, building and scanning SSA one package at a time, and writing and reading snapshot chunks.
 
-Old and new package snapshots are loaded one after the other: building one snapshot already uses every CPU, and building both at once only doubles peak memory, while cache hits are fast enough that the order costs nothing. Each declaration is summarized once per snapshot. The propagation phase uses one shared `affected` set, so multiple changes converging on one declaration do not traverse that declaration repeatedly.
+While one snapshot is built, these steps overlap:
 
-The primary package graph omits third-party `NeedDeps`, and persisted snapshots contain neither ASTs nor SSA. The peak memory of a cold analysis comes from holding the current module's ASTs, `types.Info`, and dependency type information at once, including test variants with `-tests`; SSA functions keep referencing their syntax and their package's `types.Info`, so this data cannot be released before scanning ends. A cold analysis of a module with about 3,000 Go files keeps about 400–500 MB live.
+| Running concurrently | Synchronization |
+| --- | --- |
+| The metadata `go list` and "parse files ahead + load the guessed dependencies' export data" | After the metadata arrives, the guess is awaited and checked |
+| The module snapshot and package summaries plus declaration summaries | It only reads settled metadata; awaited before the result is assembled |
+| SSA conversion scanning and declaration hashes, initialization dependencies, dynamic methods, type contracts | Starts once `objectIDs` is settled; awaited before merging into `symbols` |
+| Removing the export and storing the snapshot or analyzing the other revision | Awaited before the analysis returns |
+
+Concurrent code follows one set of rules: the shared ASTs, `types.Info`, metadata graph, and `objectIDs` are settled before a concurrent step starts and only read afterwards; workers only write the result slot of their own index, and merging happens serially after all workers finish; shared writes (the parse cache, background removal errors) are guarded by a mutex; and waits sit in `defer`, so early returns leave no goroutine or `go list` process running. The whole test suite passes under `-race`.
+
+Old and new package snapshots are built one after the other: building one snapshot already uses every CPU, and building both at once only doubles peak memory, while cache hits are fast enough that the order costs nothing. Each declaration is summarized once per snapshot. The propagation phase uses one shared `affected` set, so multiple changes converging on one declaration do not traverse that declaration repeatedly.
+
+Dependencies only load metadata and export data, never source, and persisted snapshots contain neither ASTs nor SSA. The peak memory of a cold analysis comes from holding the current module's ASTs, `types.Info`, and dependency type information at once, including test variants with `-tests`; SSA functions keep referencing their syntax and their package's `types.Info`, so this data cannot be released before scanning ends. A cold analysis of a module with about 3,000 Go files keeps about 400–500 MB live.
 
 ## 9. Code and Test Map
 
@@ -172,6 +185,7 @@ The primary package graph omits third-party `NeedDeps`, and persisted snapshots 
 | Loading and type checking | [`internal/impact/load.go`](../internal/impact/load.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | Package snapshot/hash/test variants | [`internal/impact/snapshot.go`](../internal/impact/snapshot.go) | [`internal/impact/snapshot_test.go`](../internal/impact/snapshot_test.go), [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | Declarations and dependencies | [`internal/impact/symbol.go`](../internal/impact/symbol.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
+| Syntax hashes | [`internal/impact/asthash.go`](../internal/impact/asthash.go) | [`internal/impact/snapshot_test.go`](../internal/impact/snapshot_test.go) |
 | Type contracts and interface conversions | [`internal/impact/contract.go`](../internal/impact/contract.go) | [`internal/impact/interface_flow_test.go`](../internal/impact/interface_flow_test.go) |
 | Modules/workspaces | [`internal/impact/module.go`](../internal/impact/module.go) | [`internal/impact/module_test.go`](../internal/impact/module_test.go) |
 | CGo/compiler directives | [`internal/impact/buildmeta.go`](../internal/impact/buildmeta.go) | [`internal/impact/buildmeta_test.go`](../internal/impact/buildmeta_test.go) |

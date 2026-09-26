@@ -11,7 +11,7 @@ Given old and new revisions in the same repository, ripples:
 1. Resolves each revision to a commit and Git tree without modifying the current working tree.
 2. Exports both complete trees into temporary directories through a private index, preserving the repository-relative layout. No worktree is registered, no hook runs, and sparse-checkout settings do not apply.
 3. Loads local package ASTs and type information under the effective Go build configuration, plus `_test.go` files with `-tests`.
-4. Ignores comments and source positions while comparing the semantic content of functions, methods, types, variables, constants, embedded files, and other declarations.
+4. Ignores comments and source positions while comparing the semantic content of functions, methods, types, variables, constants, embedded files, and other declarations; syntax expressed through position fields, such as the variadic spread in `f(xs...)` and the alias in `type A = B`, is still compared.
 5. Merges the old and new declaration dependency graphs and walks reverse dependencies from each changed declaration.
 6. Sorts and prints `<module-relative path>.<package name>`.
 

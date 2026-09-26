@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,6 +144,39 @@ func TestOpenRevisionSupportsConcurrentExports(t *testing.T) {
 	worktrees := gitCommand(t, repo, "worktree", "list", "--porcelain")
 	if strings.Count(worktrees, "\nworktree ") != 0 {
 		t.Fatalf("temporary worktrees remain registered:\n%s", worktrees)
+	}
+}
+
+// Large trees are written by several git processes at once.
+func TestOpenRevisionExportsLargeTreesCompletely(t *testing.T) {
+	repo := initRepository(t)
+	for dir := range 40 {
+		for file := range 20 {
+			writeFile(t, filepath.Join(repo, fmt.Sprintf("pkg%02d/nested/file%02d.go", dir, file)), fmt.Sprintf("package p%d_%d\n", dir, file))
+		}
+	}
+	if err := os.Symlink("pkg00/nested/file00.go", filepath.Join(repo, "link.go")); err != nil {
+		t.Fatal(err)
+	}
+	commit := commitAll(t, repo, "large")
+
+	source, err := Open(context.Background(), repo, commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dir := range 40 {
+		for file := range 20 {
+			assertFileContent(t, filepath.Join(source.Dir, fmt.Sprintf("pkg%02d/nested/file%02d.go", dir, file)), fmt.Sprintf("package p%d_%d\n", dir, file))
+		}
+	}
+	if target, err := os.Readlink(filepath.Join(source.Dir, "link.go")); err != nil || target != "pkg00/nested/file00.go" {
+		t.Fatalf("link.go -> %q, %v; want pkg00/nested/file00.go", target, err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(source.tempDir); !os.IsNotExist(err) {
+		t.Fatalf("export directory still exists: %v", err)
 	}
 }
 

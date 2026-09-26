@@ -16,11 +16,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	gopackages "golang.org/x/tools/go/packages"
 
@@ -111,24 +111,27 @@ func storeSnapshot(cache *snapshot.Cache, key string, result *PackageSnapshot) e
 	}
 	chunks := []*snapshotChunk{{GlobalHash: result.Modules.GlobalHash, Sums: result.Modules.Sums}}
 	for _, path := range slices.Sorted(maps.Keys(byPath)) {
-		chunk := byPath[path]
-		slices.SortFunc(chunk.Symbols, func(a, b Symbol) int { return strings.Compare(a.ID, b.ID) })
-		chunks = append(chunks, chunk)
+		chunks = append(chunks, byPath[path])
 	}
 
-	manifest := snapshotManifest{Tree: result.Tree, ModulePath: result.ModulePath}
-	for _, chunk := range chunks {
+	// Chunks are independent, so they are encoded, compressed and written
+	// concurrently; each worker owns one chunk and one manifest slot.
+	manifest := snapshotManifest{Tree: result.Tree, ModulePath: result.ModulePath, Chunks: make([]string, len(chunks))}
+	if err := parallelFor(len(chunks), func(index int) error {
+		chunk := chunks[index]
+		slices.SortFunc(chunk.Symbols, func(a, b Symbol) int { return strings.Compare(a.ID, b.ID) })
 		encoded, err := json.Marshal(chunk)
 		if err != nil {
 			return fmt.Errorf("encode snapshot chunk: %w", err)
 		}
 		chunkKey := snapshot.Key(string(encoded))
-		manifest.Chunks = append(manifest.Chunks, chunkKey)
-		if !cache.Touch(chunkNamespace, chunkKey) {
-			if err := cache.Store(chunkNamespace, chunkKey, json.RawMessage(encoded)); err != nil {
-				return err
-			}
+		manifest.Chunks[index] = chunkKey
+		if cache.Touch(chunkNamespace, chunkKey) {
+			return nil
 		}
+		return cache.Store(chunkNamespace, chunkKey, json.RawMessage(encoded))
+	}); err != nil {
+		return err
 	}
 	return cache.Store(manifestNamespace, key, manifest)
 }
@@ -191,15 +194,22 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare 
 	}
 
 	// Module identities come from the same load, so the package graph and
-	// the module graph always describe one Git tree.
-	modules, err := buildModuleSnapshot(ctx, source.Dir, loaded)
-	if err != nil {
-		return PackageSnapshot{}, err
-	}
+	// the module graph always describe one Git tree. They only read the
+	// loaded metadata, so they are computed while the declarations are
+	// summarized; every return waits for them.
+	var (
+		modules    moduleSnapshot
+		modulesErr error
+		modulesRun sync.WaitGroup
+	)
+	modulesRun.Go(func() {
+		modules, modulesErr = buildModuleSnapshot(ctx, source.Dir, loaded)
+	})
+	defer modulesRun.Wait()
+
 	result := PackageSnapshot{
 		Tree:       source.Tree,
 		ModulePath: modulePath,
-		Modules:    modules,
 		Packages:   make(map[string]Package, len(loaded)),
 		Symbols:    make(map[string]Symbol),
 	}
@@ -236,6 +246,11 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare 
 	if err != nil {
 		return PackageSnapshot{}, err
 	}
+	modulesRun.Wait()
+	if modulesErr != nil {
+		return PackageSnapshot{}, modulesErr
+	}
+	result.Modules = modules
 	return result, nil
 }
 
@@ -310,7 +325,7 @@ func summarizePackage(root, modulePath string, pkg *gopackages.Package) (Package
 
 	fileHashes := make([]string, 0, len(pkg.CompiledGoFiles)+len(pkg.EmbedFiles)+len(pkg.OtherFiles))
 	for index := range pkg.CompiledGoFiles {
-		hash, err := astFileHash(pkg.Syntax[index], pkg.Fset)
+		hash, err := astHash(pkg.Syntax[index])
 		if err != nil {
 			return Package{}, fmt.Errorf("hash package %s: %w", pkg.PkgPath, err)
 		}
@@ -354,34 +369,6 @@ func summarizePackage(root, modulePath string, pkg *gopackages.Package) (Package
 		RelativePath: relativePackagePath(modulePath, path),
 		Hash:         hex.EncodeToString(hash.Sum(nil)),
 	}, nil
-}
-
-func astFileHash(file *ast.File, fset *token.FileSet) (string, error) {
-	// packages.Load parses without SkipObjectResolution. These deprecated
-	// parser-only links are not used by go/types, but the legacy hash included
-	// their nil fields after reparsing with SkipObjectResolution. Exclude those
-	// fields while printing so concurrent declaration hashing stays read-only.
-	hash := sha256.New()
-	if err := ast.Fprint(hash, fset, file, astFieldFilter); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func astFieldFilter(name string, value reflect.Value) bool {
-	if name == "Doc" || name == "Comment" || name == "Comments" ||
-		name == "Obj" || name == "Scope" || name == "Unresolved" {
-		return false
-	}
-	return value.Type() != reflect.TypeFor[token.Pos]()
-}
-
-func astHash(node ast.Node, fset *token.FileSet) (string, error) {
-	hash := sha256.New()
-	if err := ast.Fprint(hash, fset, node, astFieldFilter); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func objectKind(object types.Object) string {

@@ -2,11 +2,16 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 // Source is an immutable export of a Git tree in a temporary directory. Dir
@@ -21,6 +26,7 @@ type Source struct {
 	Dir      string
 
 	tempDir string
+	treeDir string
 }
 
 // Revision identifies an immutable Git tree.
@@ -100,6 +106,7 @@ func OpenRevision(ctx context.Context, revision *Revision) (*Source, error) {
 		Tree:     revision.Tree,
 		Dir:      filepath.Join(root, revision.Subdir),
 		tempDir:  tempDir,
+		treeDir:  root,
 	}
 
 	// A private index keeps the repository index, worktree list, hooks and
@@ -110,14 +117,13 @@ func OpenRevision(ctx context.Context, revision *Revision) (*Source, error) {
 		"GIT_INDEX_FILE="+filepath.Join(tempDir, "index"),
 		"GIT_LFS_SKIP_SMUDGE=1",
 	)
-	for _, args := range [][]string{
-		{"-c", "core.sparseCheckout=false", "read-tree", revision.Tree},
-		{"-c", "core.sparseCheckout=false", "checkout-index", "--all", "--prefix=" + root + string(filepath.Separator)},
-	} {
-		if _, err := gitOutput(ctx, revision.GitRoot, env, args...); err != nil {
-			_ = source.Close()
-			return nil, fmt.Errorf("export tree %s: %w", revision.Tree, err)
-		}
+	if _, err := gitOutput(ctx, revision.GitRoot, env, "-c", "core.sparseCheckout=false", "read-tree", revision.Tree); err != nil {
+		_ = source.Close()
+		return nil, fmt.Errorf("export tree %s: %w", revision.Tree, err)
+	}
+	if err := checkoutTree(ctx, revision.GitRoot, env, root); err != nil {
+		_ = source.Close()
+		return nil, fmt.Errorf("export tree %s: %w", revision.Tree, err)
 	}
 	if info, err := os.Stat(source.Dir); err != nil {
 		_ = source.Close()
@@ -134,7 +140,88 @@ func (s *Source) Close() error {
 	if s == nil || s.tempDir == "" {
 		return nil
 	}
-	return os.RemoveAll(s.tempDir)
+	// Removing a large tree is dominated by file-system calls, so the
+	// top-level entries are removed concurrently. A missing tree is left to
+	// the final RemoveAll.
+	entries, _ := os.ReadDir(s.treeDir)
+	errs := make([]error, len(entries)+1)
+	limit := make(chan struct{}, runtime.GOMAXPROCS(0))
+	var wait sync.WaitGroup
+	for index, entry := range entries {
+		wait.Go(func() {
+			limit <- struct{}{}
+			errs[index] = os.RemoveAll(filepath.Join(s.treeDir, entry.Name()))
+			<-limit
+		})
+	}
+	wait.Wait()
+	errs[len(entries)] = os.RemoveAll(s.tempDir)
+	return errors.Join(errs...)
+}
+
+// checkoutTree writes the files of the private index below root. Writing
+// thousands of files is bound by file-system calls, so once every directory
+// exists the files are split across several git processes. Files whose
+// directories differ only in case share a process, so case-insensitive file
+// systems still resolve such collisions in index order.
+func checkoutTree(ctx context.Context, gitRoot string, env []string, root string) error {
+	list := exec.CommandContext(ctx, "git", "ls-files", "--stage", "-z")
+	list.Dir = gitRoot
+	list.Env = env
+	var stderr strings.Builder
+	list.Stderr = &stderr
+	output, err := list.Output()
+	if err != nil {
+		return fmt.Errorf("git ls-files: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	entries := strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00")
+	workers := max(1, min(runtime.GOMAXPROCS(0), 8, len(entries)/128))
+	groups := make([][]string, workers)
+	dirs := map[string]bool{".": true}
+	for _, entry := range entries {
+		// Each entry is "<mode> <object> <stage>\t<path>".
+		meta, path, ok := strings.Cut(entry, "\t")
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(meta, "160000 ") {
+			// Like checkout-index --all, a submodule becomes an empty directory.
+			dirs[path] = true
+			continue
+		}
+		dir := pathpkg.Dir(path)
+		dirs[dir] = true
+		group := fnv.New32a()
+		_, _ = group.Write([]byte(strings.ToLower(dir)))
+		index := group.Sum32() % uint32(workers)
+		groups[index] = append(groups[index], path)
+	}
+	for dir := range dirs {
+		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(dir)), 0o750); err != nil {
+			return fmt.Errorf("create export directory: %w", err)
+		}
+	}
+
+	errs := make([]error, workers)
+	var wait sync.WaitGroup
+	for index, paths := range groups {
+		if len(paths) == 0 {
+			continue
+		}
+		wait.Go(func() {
+			cmd := exec.CommandContext(ctx, "git", "-c", "core.sparseCheckout=false",
+				"checkout-index", "-z", "--stdin", "--prefix="+root+string(filepath.Separator))
+			cmd.Dir = gitRoot
+			cmd.Env = env
+			cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00") + "\x00")
+			if output, err := cmd.CombinedOutput(); err != nil {
+				errs[index] = fmt.Errorf("git checkout-index: %w: %s", err, strings.TrimSpace(string(output)))
+			}
+		})
+	}
+	wait.Wait()
+	return errors.Join(errs...)
 }
 
 func gitOutput(ctx context.Context, dir string, env []string, args ...string) (string, error) {

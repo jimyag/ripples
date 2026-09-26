@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,52 +54,51 @@ func buildModuleSnapshot(ctx context.Context, root string, loaded []*gopackages.
 		Packages:   make(map[string]packageModules, len(loaded)),
 		Sums:       sums,
 	}
-	memo := make(map[string]packageModules)
+	memo := make(map[*gopackages.Package]*moduleUse)
 	for _, pkg := range loaded {
-		if pkg.ForTest == "" {
-			result.Packages[pkg.PkgPath] = collectPackageModules(pkg, memo)
+		if pkg.ForTest != "" {
+			continue
+		}
+		modules := make(map[string]struct{})
+		sumKeys := make(map[string]struct{})
+		for _, imported := range pkg.Imports {
+			use := importedModules(imported, memo)
+			maps.Copy(modules, use.modules)
+			maps.Copy(sumKeys, use.sumKeys)
+		}
+		result.Packages[pkg.PkgPath] = packageModules{
+			Modules: sortedSet(modules),
+			SumKeys: sortedSet(sumKeys),
 		}
 	}
 	return result, nil
 }
 
-func collectPackageModules(pkg *gopackages.Package, memo map[string]packageModules) packageModules {
-	if cached, ok := memo[pkg.PkgPath]; ok {
-		return cached
-	}
-	modules := make(map[string]struct{})
-	sumKeys := make(map[string]struct{})
-	for _, imported := range pkg.Imports {
-		collectImportedModules(imported, modules, sumKeys, make(map[string]struct{}))
-	}
-	result := packageModules{
-		Modules: sortedSet(modules),
-		SumKeys: sortedSet(sumKeys),
-	}
-	memo[pkg.PkgPath] = result
-	return result
+// moduleUse holds the modules, and their checksum keys, of a package and
+// everything it imports.
+type moduleUse struct {
+	modules map[string]struct{}
+	sumKeys map[string]struct{}
 }
 
-func collectImportedModules(
-	pkg *gopackages.Package,
-	modules map[string]struct{},
-	sumKeys map[string]struct{},
-	visited map[string]struct{},
-) {
-	if pkg == nil {
-		return
+// importedModules computes moduleUse once per package of the import graph,
+// so the cost grows with the graph instead of with every path through it.
+func importedModules(pkg *gopackages.Package, memo map[*gopackages.Package]*moduleUse) *moduleUse {
+	if use, ok := memo[pkg]; ok {
+		return use
 	}
-	if _, seen := visited[pkg.PkgPath]; seen {
-		return
-	}
-	visited[pkg.PkgPath] = struct{}{}
+	use := &moduleUse{modules: make(map[string]struct{}), sumKeys: make(map[string]struct{})}
 	if pkg.Module != nil && !pkg.Module.Main {
-		modules[moduleIdentity(pkg.Module)] = struct{}{}
-		addModuleSumKeys(sumKeys, pkg.Module)
+		use.modules[moduleIdentity(pkg.Module)] = struct{}{}
+		addModuleSumKeys(use.sumKeys, pkg.Module)
 	}
 	for _, imported := range pkg.Imports {
-		collectImportedModules(imported, modules, sumKeys, visited)
+		child := importedModules(imported, memo)
+		maps.Copy(use.modules, child.modules)
+		maps.Copy(use.sumKeys, child.sumKeys)
 	}
+	memo[pkg] = use
+	return use
 }
 
 func moduleIdentity(module *gopackages.Module) string {

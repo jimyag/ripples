@@ -12,7 +12,7 @@ import (
 	gopackages "golang.org/x/tools/go/packages"
 )
 
-func TestASTFileHashMatchesReparsedFile(t *testing.T) {
+func TestASTHashMatchesReparsedFile(t *testing.T) {
 	filename := filepath.Join(t.TempDir(), "example.go")
 	source := []byte(`package example
 
@@ -39,37 +39,61 @@ func Value(input int) int {
 		t.Fatalf("loaded packages = %#v", loadedPackages)
 	}
 	loaded := loadedPackages[0].Syntax[0]
-	loadedFset := loadedPackages[0].Fset
 	loadedScope := loaded.Scope
 	loadedObjects := parserObjectCount(loaded)
 
-	reparsedFset := token.NewFileSet()
-	reparsed, err := parser.ParseFile(reparsedFset, filename, nil, parser.SkipObjectResolution)
+	reparsed, err := parser.ParseFile(token.NewFileSet(), filename, nil, parser.SkipObjectResolution)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := astFileHash(loaded, loadedFset)
+	got, err := astHash(loaded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := legacyASTFileHash(reparsed, reparsedFset)
+	want, err := astHash(reparsed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != want {
-		t.Fatalf("astFileHash() = %q, want legacy hash %q", got, want)
+		t.Fatalf("astHash(loaded) = %q, want the hash of the reparsed file %q", got, want)
 	}
 	if loaded.Scope != loadedScope {
-		t.Fatal("astFileHash() did not restore the loaded AST scope")
+		t.Fatal("astHash() changed the loaded AST scope")
 	}
 	if got := parserObjectCount(loaded); got != loadedObjects {
-		t.Fatalf("astFileHash() restored %d parser objects, want %d", got, loadedObjects)
+		t.Fatalf("astHash() left %d parser objects, want %d", got, loadedObjects)
 	}
 }
 
-func legacyASTFileHash(file *ast.File, fset *token.FileSet) (string, error) {
-	return astFileHash(file, fset)
+func TestASTHashIgnoresLayoutButNotSemantics(t *testing.T) {
+	hash := func(source string) string {
+		t.Helper()
+		file, err := parser.ParseFile(token.NewFileSet(), "example.go", "package example\n\n"+source, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := astHash(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if hash("func F(a int) int { return a + 1 }") !=
+		hash("// F documents itself.\nfunc F(a int) int {\n\t// One more.\n\treturn a +\n\t\t1\n}\n") {
+		t.Error("comments and layout changed the hash")
+	}
+	for _, pair := range [][2]string{
+		{"func F(xs []any) { G(xs...) }", "func F(xs []any) { G(xs) }"},
+		{"func F() { type T = int }", "func F() { type T int }"},
+		{"func F(a []int, x int) []int { return a[:x] }", "func F(a []int, x int) []int { return a[x:] }"},
+		{"func F(p *int) any { return *p }", "func F(p *int) any { return (p) }"},
+		{"func F(a, b int) int { return a + b }", "func F(a, b int) int { return a - b }"},
+	} {
+		if hash(pair[0]) == hash(pair[1]) {
+			t.Errorf("%q and %q have the same hash", pair[0], pair[1])
+		}
+	}
 }
 
 func parserObjectCount(file *ast.File) int {
@@ -95,7 +119,7 @@ type Config struct {
 		t.Fatal(err)
 	}
 	field := file.Decls[0].(*ast.GenDecl).Specs[0].(*ast.TypeSpec).Type.(*ast.StructType).Fields.List[0]
-	want, err := astHash(field, fset)
+	want, err := astHash(field)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +129,7 @@ type Config struct {
 	var group sync.WaitGroup
 	for range workers {
 		group.Go(func() {
-			got, hashErr := astHash(field, fset)
+			got, hashErr := astHash(field)
 			if hashErr != nil {
 				results <- hashErr.Error()
 				return

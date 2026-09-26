@@ -11,11 +11,12 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"sync"
 
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-const analysisVersion = "symbol-impact-v28"
+const analysisVersion = "symbol-impact-v29"
 
 // Analyzer computes declaration-level impact between two Git revisions.
 type Analyzer struct {
@@ -59,7 +60,11 @@ func (a *Analyzer) Analyze(ctx context.Context, repoPath, oldRef, newRef string)
 
 // AnalyzeDetailed returns affected packages together with the package-level
 // reverse dependency subgraph used to derive them.
-func (a *Analyzer) AnalyzeDetailed(ctx context.Context, repoPath, oldRef, newRef string) (Analysis, error) {
+func (a *Analyzer) AnalyzeDetailed(ctx context.Context, repoPath, oldRef, newRef string) (_ Analysis, returnErr error) {
+	var exports cleanups
+	defer func() {
+		returnErr = errors.Join(returnErr, exports.finish())
+	}()
 	config, err := buildConfiguration(ctx)
 	if err != nil {
 		return Analysis{}, err
@@ -71,7 +76,7 @@ func (a *Analyzer) AnalyzeDetailed(ctx context.Context, repoPath, oldRef, newRef
 		newRef,
 		snapshot.Resolve,
 		func(ctx context.Context, revision *snapshot.Revision) (*PackageSnapshot, error) {
-			return a.loadResolvedSnapshot(ctx, revision, config)
+			return a.loadResolvedSnapshot(ctx, revision, config, &exports)
 		},
 	)
 	if err != nil {
@@ -188,7 +193,11 @@ func loadSnapshotPair(
 
 // LoadSnapshot loads a package summary from cache or builds it from an
 // immutable export of the Git tree.
-func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (*PackageSnapshot, error) {
+func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (_ *PackageSnapshot, returnErr error) {
+	var exports cleanups
+	defer func() {
+		returnErr = errors.Join(returnErr, exports.finish())
+	}()
 	revision, err := snapshot.Resolve(ctx, repoPath, ref)
 	if err != nil {
 		return nil, err
@@ -197,14 +206,38 @@ func (a *Analyzer) LoadSnapshot(ctx context.Context, repoPath, ref string) (*Pac
 	if err != nil {
 		return nil, err
 	}
-	return a.loadResolvedSnapshot(ctx, revision, config)
+	return a.loadResolvedSnapshot(ctx, revision, config, &exports)
+}
+
+// cleanups removes exports in the background while the analysis continues;
+// finish waits for every removal and returns their errors.
+type cleanups struct {
+	wait sync.WaitGroup
+	mu   sync.Mutex
+	errs []error
+}
+
+func (c *cleanups) run(remove func() error) {
+	c.wait.Go(func() {
+		if err := remove(); err != nil {
+			c.mu.Lock()
+			c.errs = append(c.errs, err)
+			c.mu.Unlock()
+		}
+	})
+}
+
+func (c *cleanups) finish() error {
+	c.wait.Wait()
+	return errors.Join(c.errs...)
 }
 
 func (a *Analyzer) loadResolvedSnapshot(
 	ctx context.Context,
 	revision *snapshot.Revision,
 	config string,
-) (_ *PackageSnapshot, returnErr error) {
+	exports *cleanups,
+) (*PackageSnapshot, error) {
 	key := analysisCacheKey("package-graph", revision, config, a.Prepare, strconv.FormatBool(a.Tests))
 	if a.cache != nil {
 		if cached, ok := loadCachedSnapshot(a.cache, key); ok {
@@ -216,9 +249,9 @@ func (a *Analyzer) loadResolvedSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		returnErr = errors.Join(returnErr, source.Close())
-	}()
+	// Removing a large export takes a while; it runs in the background while
+	// the snapshot is stored and the analysis continues.
+	defer exports.run(source.Close)
 
 	result, err := buildPackageSnapshot(ctx, source, a.Prepare, a.Tests)
 	if err != nil {

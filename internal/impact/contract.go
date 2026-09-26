@@ -99,19 +99,43 @@ func collectDynamicMethods(localPackages []*gopackages.Package, declarations []s
 	for _, pkg := range localPackages {
 		local[pkg.Types] = true
 	}
-	dependencies := make(map[*types.Package]bool)
+	var dependencies []*types.Package
+	seenPackages := make(map[*types.Package]bool)
 	var visit func([]*types.Package)
 	visit = func(imports []*types.Package) {
 		for _, imported := range imports {
-			if !local[imported] && !dependencies[imported] {
-				dependencies[imported] = true
+			if !local[imported] && !seenPackages[imported] {
+				seenPackages[imported] = true
+				dependencies = append(dependencies, imported)
 				visit(imported.Imports())
 			}
 		}
 	}
-	for _, declaration := range declarations {
+	for _, pkg := range localPackages {
+		visit(pkg.Types.Imports())
+	}
+
+	// Walking the syntax and the dependency scopes runs concurrently, each
+	// worker filling its own slot; the results are merged afterwards.
+	type interfaceUse struct {
+		typ    types.Type
+		method *types.Func // nil for every method of typ
+		caller string
+	}
+	uses := make([][]interfaceUse, len(declarations)+len(dependencies))
+	_ = parallelFor(len(uses), func(index int) error {
+		if index >= len(declarations) {
+			scope := dependencies[index-len(declarations)].Scope()
+			for _, name := range scope.Names() {
+				if typeName, ok := scope.Lookup(name).(*types.TypeName); ok {
+					uses[index] = append(uses[index], interfaceUse{typ: typeName.Type()})
+				}
+			}
+			return nil
+		}
+		declaration := declarations[index]
 		if declaration.node == nil {
-			continue
+			return nil
 		}
 		info := declaration.pkg.TypesInfo
 		ast.Inspect(declaration.node, func(node ast.Node) bool {
@@ -119,33 +143,30 @@ func collectDynamicMethods(localPackages []*gopackages.Package, declarations []s
 			case *ast.Ident:
 				if method, ok := info.Uses[node].(*types.Func); ok {
 					if recv := method.Signature().Recv(); recv != nil {
-						if iface, ok := recv.Type().Underlying().(*types.Interface); ok {
-							addMethod(iface, method, declaration.id)
-						}
+						uses[index] = append(uses[index], interfaceUse{typ: recv.Type(), method: method, caller: declaration.id})
 					}
 				}
 			case *ast.TypeAssertExpr:
 				if node.Type != nil {
-					addInterface(info.TypeOf(node.Type))
+					uses[index] = append(uses[index], interfaceUse{typ: info.TypeOf(node.Type)})
 				}
 			case *ast.TypeSwitchStmt:
 				for _, clause := range node.Body.List {
 					for _, expression := range clause.(*ast.CaseClause).List {
-						addInterface(info.TypeOf(expression))
+						uses[index] = append(uses[index], interfaceUse{typ: info.TypeOf(expression)})
 					}
 				}
 			}
 			return true
 		})
-	}
-	for _, pkg := range localPackages {
-		visit(pkg.Types.Imports())
-	}
-	for pkg := range dependencies {
-		scope := pkg.Scope()
-		for _, name := range scope.Names() {
-			if typeName, ok := scope.Lookup(name).(*types.TypeName); ok {
-				addInterface(typeName.Type())
+		return nil
+	})
+	for _, itemUses := range uses {
+		for _, use := range itemUses {
+			if use.method == nil {
+				addInterface(use.typ)
+			} else if iface, ok := use.typ.Underlying().(*types.Interface); ok {
+				addMethod(iface, use.method, use.caller)
 			}
 		}
 	}
@@ -234,63 +255,86 @@ func addTypeContractSymbols(
 	reachable dynamicMethods,
 	symbols map[string]Symbol,
 ) {
+	var named []*types.TypeName
 	for object := range objectIDs {
 		typeName, ok := object.(*types.TypeName)
 		if !ok || typeName.IsAlias() {
 			continue
 		}
-		named, ok := typeName.Type().(*types.Named)
+		if _, ok := typeName.Type().(*types.Named); !ok || types.IsInterface(typeName.Type()) {
+			continue
+		}
+		named = append(named, typeName)
+	}
+	// Types are independent: each worker builds the symbols of one type from
+	// read-only inputs, and the symbols are inserted afterwards.
+	built := make([][3]Symbol, len(named))
+	_ = parallelFor(len(named), func(index int) error {
+		built[index] = typeContractSymbols(named[index], objectIDs, reportPaths, reachable)
+		return nil
+	})
+	for _, typeSymbols := range built {
+		for _, symbol := range typeSymbols {
+			symbols[symbol.ID] = symbol
+		}
+	}
+}
+
+// typeContractSymbols returns the layout, contract and dispatch symbols of a
+// named non-interface type.
+func typeContractSymbols(
+	typeName *types.TypeName,
+	objectIDs map[types.Object]string,
+	reportPaths map[*types.Package]string,
+	reachable dynamicMethods,
+) [3]Symbol {
+	named := typeName.Type().(*types.Named)
+	layout, _ := typeSymbolID("layout", typeName, objectIDs)
+	packagePath := reportPaths[typeName.Pkg()]
+
+	full := map[string]struct{}{layout: {}}
+	dispatch := map[string]struct{}{layout: {}}
+	var dynamic []DynamicDependency
+	for selection := range types.NewMethodSet(types.NewPointer(named)).Methods() {
+		method := selection.Obj().(*types.Func)
+		id, ok := objectIDs[declaredObject(method)]
 		if !ok {
 			continue
 		}
-		if _, isInterface := named.Underlying().(*types.Interface); isInterface {
-			continue
+		full[id] = struct{}{}
+		anywhere, callers := reachable.reach(named, method)
+		if anywhere {
+			dispatch[id] = struct{}{}
+		} else if len(callers) > 0 {
+			slices.Sort(callers)
+			dynamic = append(dynamic, DynamicDependency{ID: id, Callers: slices.Compact(callers)})
 		}
-		layout, _ := typeSymbolID("layout", typeName, objectIDs)
-		packagePath := reportPaths[typeName.Pkg()]
-		symbols[layout] = Symbol{
+	}
+	addContractDependencies(named.Underlying(), "contract", objectIDs, full)
+	addContractDependencies(named.Underlying(), "dispatch", objectIDs, dispatch)
+	contract, _ := typeSymbolID("contract", typeName, objectIDs)
+	delete(full, contract)
+	dispatchID, _ := typeSymbolID("dispatch", typeName, objectIDs)
+	delete(dispatch, dispatchID)
+	return [3]Symbol{
+		{
 			ID:          layout,
 			PackagePath: packagePath,
 			Hash:        stableMarkerHash(types.TypeString(named.Underlying(), packageQualifier)),
-		}
-
-		full := map[string]struct{}{layout: {}}
-		dispatch := map[string]struct{}{layout: {}}
-		var dynamic []DynamicDependency
-		for selection := range types.NewMethodSet(types.NewPointer(named)).Methods() {
-			method := selection.Obj().(*types.Func)
-			id, ok := objectIDs[declaredObject(method)]
-			if !ok {
-				continue
-			}
-			full[id] = struct{}{}
-			anywhere, callers := reachable.reach(named, method)
-			if anywhere {
-				dispatch[id] = struct{}{}
-			} else if len(callers) > 0 {
-				slices.Sort(callers)
-				dynamic = append(dynamic, DynamicDependency{ID: id, Callers: slices.Compact(callers)})
-			}
-		}
-		addContractDependencies(named.Underlying(), "contract", objectIDs, full)
-		addContractDependencies(named.Underlying(), "dispatch", objectIDs, dispatch)
-		contract, _ := typeSymbolID("contract", typeName, objectIDs)
-		delete(full, contract)
-		symbols[contract] = Symbol{
+		},
+		{
 			ID:           contract,
 			PackagePath:  packagePath,
 			Hash:         stableMarkerHash("contract"),
 			Dependencies: sortedSet(full),
-		}
-		dispatchID, _ := typeSymbolID("dispatch", typeName, objectIDs)
-		delete(dispatch, dispatchID)
-		symbols[dispatchID] = Symbol{
+		},
+		{
 			ID:           dispatchID,
 			PackagePath:  packagePath,
 			Hash:         stableMarkerHash("dispatch"),
 			Dependencies: sortedSet(dispatch),
 			Dynamic:      dynamic,
-		}
+		},
 	}
 }
 
@@ -333,18 +377,18 @@ func addContractDependencies(typ types.Type, kind string, objectIDs map[types.Ob
 	}
 }
 
-// addConversionDependencies builds SSA for the local packages and makes every
-// declaration that converts a concrete value to an interface depend on the
-// contract or dispatch contract of the converted type. SSA makes every
-// implicit conversion explicit as a MakeInterface instruction.
-func addConversionDependencies(
+// conversionDependencies builds SSA for the local packages and returns, per
+// package, the contracts or dispatch contracts of the types each declaration
+// converts to an interface. SSA makes every implicit conversion explicit as a
+// MakeInterface instruction. It only reads its inputs, so it runs while the
+// declarations are hashed.
+func conversionDependencies(
 	localPackages []*gopackages.Package,
 	declarations []symbolDeclaration,
 	objectIDs map[types.Object]string,
-	symbols map[string]Symbol,
-) {
+) []map[string]map[string]struct{} {
 	if len(localPackages) == 0 {
-		return
+		return nil
 	}
 	type declaredFunction struct {
 		object *types.Func
@@ -445,6 +489,12 @@ func addConversionDependencies(
 		results[index] = added
 		return nil
 	})
+	return results
+}
+
+// addConversionDependencies adds the dependencies from conversionDependencies
+// to the converting declarations.
+func addConversionDependencies(results []map[string]map[string]struct{}, symbols map[string]Symbol) {
 	for _, added := range results {
 		for id, dependencies := range added {
 			symbol, ok := symbols[id]

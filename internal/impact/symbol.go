@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	gopackages "golang.org/x/tools/go/packages"
 )
@@ -39,13 +40,24 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 		return nil, err
 	}
 
+	// From here on objectIDs and the declarations are only read, so the SSA
+	// conversions are computed while the declarations are summarized.
+	var (
+		conversions    []map[string]map[string]struct{}
+		conversionsRun sync.WaitGroup
+	)
+	conversionsRun.Go(func() {
+		conversions = conversionDependencies(localPackages, declarations, objectIDs)
+	})
+	defer conversionsRun.Wait()
+
 	summaries := make([]Symbol, len(declarations))
 	if err := parallelFor(len(declarations), func(index int) error {
 		declaration := declarations[index]
 		hash := declaration.hash
 		if hash == "" {
 			var err error
-			hash, err = astHash(declaration.hashNode, declaration.pkg.Fset)
+			hash, err = astHash(declaration.hashNode)
 			if err != nil {
 				return fmt.Errorf("hash declaration %s: %w", declaration.id, err)
 			}
@@ -92,7 +104,8 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 	}
 	addInitializationDependencies(localPackages, declarations, objectIDs, symbols)
 	addTypeContractSymbols(objectIDs, reportPaths, collectDynamicMethods(localPackages, declarations), symbols)
-	addConversionDependencies(localPackages, declarations, objectIDs, symbols)
+	conversionsRun.Wait()
+	addConversionDependencies(conversions, symbols)
 	return symbols, nil
 }
 
@@ -289,7 +302,7 @@ func packageDeclarations(root string, pkg *gopackages.Package, objectIDs map[typ
 							declarations = append(declarations, symbolDeclaration{
 								id:                id,
 								node:              typeParameters,
-								hash:              typeShellHash(typedSpec, kind, pkg),
+								hash:              typeShellHash(typedSpec, kind),
 								buildMetadataHash: buildMetadataHash,
 								pkg:               pkg,
 							})
@@ -438,7 +451,7 @@ func typeFields(node ast.Expr) (*ast.FieldList, string) {
 	}
 }
 
-func typeShellHash(spec *ast.TypeSpec, kind string, pkg *gopackages.Package) string {
+func typeShellHash(spec *ast.TypeSpec, kind string) string {
 	hash := sha256.New()
 	_, _ = io.WriteString(hash, spec.Name.Name)
 	_, _ = hash.Write([]byte{0})
@@ -448,7 +461,8 @@ func typeShellHash(spec *ast.TypeSpec, kind string, pkg *gopackages.Package) str
 	}
 	if spec.TypeParams != nil {
 		_, _ = hash.Write([]byte{0})
-		_ = ast.Fprint(hash, pkg.Fset, spec.TypeParams, astFieldFilter)
+		typeParams, _ := astHash(spec.TypeParams)
+		_, _ = io.WriteString(hash, typeParams)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }

@@ -6,13 +6,19 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"io/fs"
+	"maps"
 	"os"
+	pathpkg "path"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
+	"golang.org/x/mod/modfile"
 	gopackages "golang.org/x/tools/go/packages"
 )
 
@@ -30,6 +36,29 @@ func loadPackages(ctx context.Context, dir string, tests bool) ([]*gopackages.Pa
 	// dependencies independent of the export directory, so the build
 	// cache reuses them across runs and trees.
 	buildFlags := []string{"-trimpath"}
+	checker := &sourceChecker{
+		fset:  token.NewFileSet(),
+		files: make(map[string]*parsedFile),
+	}
+
+	// Reading the metadata and preparing the dependencies' export data each
+	// take go list about a second. Both run at once: the module's files are
+	// parsed right away and the export data of everything they import is
+	// loaded while the metadata is read. The metadata then confirms the
+	// dependencies, and a guess that missed one falls back to an exact load.
+	guessCtx, cancelGuess := context.WithCancel(ctx)
+	var (
+		guessed    map[string]*gopackages.Package
+		guessedRun sync.WaitGroup
+	)
+	guessedRun.Go(func() {
+		if imports := checker.parseModule(dir, tests); len(imports) > 0 {
+			guessed = loadExportData(guessCtx, dir, buildFlags, imports)
+		}
+	})
+	defer guessedRun.Wait()
+	defer cancelGuess()
+
 	metadata, err := gopackages.Load(&gopackages.Config{
 		Context: ctx,
 		Dir:     dir,
@@ -85,20 +114,19 @@ func loadPackages(ctx context.Context, dir string, tests bool) ([]*gopackages.Pa
 	if err := packageErrors(source); err != nil {
 		return nil, err
 	}
-	if err := loadDependencyTypes(ctx, dir, buildFlags, dependencies); err != nil {
-		return nil, err
+	guessedRun.Wait()
+	if !useExportData(guessed, dependencies) {
+		if err := loadDependencyTypes(ctx, dir, buildFlags, dependencies); err != nil {
+			return nil, err
+		}
 	}
 
-	checker := &sourceChecker{
-		fset:   token.NewFileSet(),
-		sizes:  roots[0].TypesSizes,
-		isRoot: isRoot,
-		states: make(map[string]*checkState, len(source)),
-		files:  make(map[string]*parsedFile),
-	}
+	checker.sizes = roots[0].TypesSizes
 	if checker.sizes == nil {
 		checker.sizes = types.SizesFor("gc", runtime.GOARCH)
 	}
+	checker.isRoot = isRoot
+	checker.states = make(map[string]*checkState, len(source))
 	for _, pkg := range source {
 		checker.states[pkg.ID] = &checkState{}
 	}
@@ -111,6 +139,117 @@ func loadPackages(ctx context.Context, dir string, tests bool) ([]*gopackages.Pa
 		return nil, err
 	}
 	return roots, nil
+}
+
+// parseModule parses the Go files of the module in dir, which the metadata
+// will list later, and returns the import paths outside the module's own
+// packages. It is a guess: files excluded by build constraints are included,
+// and parse errors surface only if the metadata lists the file.
+func (c *sourceChecker) parseModule(dir string, tests bool) []string {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return nil
+	}
+	modulePath := modfile.ModulePath(data)
+	if modulePath == "" {
+		return nil
+	}
+	var files []string
+	local := map[string]bool{"C": true, "unsafe": true}
+	// A walk error only leaves the guess incomplete, which the exact load
+	// catches, so it just stops the walk.
+	_ = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := entry.Name()
+		if entry.IsDir() {
+			if path == dir {
+				return nil
+			}
+			// The go command skips these directories, and a go.mod starts
+			// another module whose packages are dependencies.
+			if name == "vendor" || name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(name, ".go") || !tests && strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		files = append(files, path)
+		relative, err := filepath.Rel(dir, filepath.Dir(path))
+		if err == nil {
+			local[pathpkg.Join(modulePath, filepath.ToSlash(relative))] = true
+		}
+		return nil
+	})
+
+	imports := make([][]string, len(files))
+	_ = parallelFor(len(files), func(index int) error {
+		file, _ := c.parse(files[index])
+		if file == nil {
+			return nil
+		}
+		for _, spec := range file.Imports {
+			if path, err := strconv.Unquote(spec.Path.Value); err == nil {
+				imports[index] = append(imports[index], path)
+			}
+		}
+		return nil
+	})
+	guessed := make(map[string]bool)
+	for _, fileImports := range imports {
+		for _, path := range fileImports {
+			if path == "C" {
+				// cgo output imports these on behalf of the file.
+				guessed["runtime/cgo"] = true
+				guessed["syscall"] = true
+			}
+			if !local[path] {
+				guessed[path] = true
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(guessed))
+}
+
+// loadExportData loads the types of paths from export data, keyed by package
+// ID, or returns nil if go list fails.
+func loadExportData(ctx context.Context, dir string, buildFlags, paths []string) map[string]*gopackages.Package {
+	loaded, err := gopackages.Load(&gopackages.Config{
+		Context:    ctx,
+		Dir:        dir,
+		Mode:       gopackages.NeedName | gopackages.NeedTypes,
+		BuildFlags: buildFlags,
+	}, paths...)
+	if err != nil {
+		return nil
+	}
+	byID := make(map[string]*gopackages.Package, len(loaded))
+	for _, pkg := range loaded {
+		byID[pkg.ID] = pkg
+	}
+	return byID
+}
+
+// useExportData takes the dependencies' types from a guessed load if it
+// loaded every one of them without errors. All types then come from one load
+// and share their objects; otherwise nothing is taken.
+func useExportData(loaded map[string]*gopackages.Package, dependencies map[string]*gopackages.Package) bool {
+	for id := range dependencies {
+		pkg := loaded[id]
+		if pkg == nil || pkg.Types == nil || len(pkg.Errors) > 0 {
+			return false
+		}
+	}
+	for id, dependency := range dependencies {
+		dependency.Types = loaded[id].Types
+	}
+	return true
 }
 
 // loadDependencyTypes fills the Types of the dependency packages from export

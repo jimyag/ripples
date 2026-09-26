@@ -27,14 +27,14 @@ flowchart LR
 
 ## 1. Revision 与隔离导出
 
-[`internal/snapshot/source.go`](../internal/snapshot/source.go) 的 `Resolve` 使用 `git rev-parse --verify` 解析 commit 和 tree，并记录 module 目录相对 Git 根目录的位置。`OpenRevision` 用 `GIT_INDEX_FILE` 指向的私有 index 执行 `git read-tree` 和 `git checkout-index --all --prefix`，把完整 tree 导出到临时目录：
+[`internal/snapshot/source.go`](../internal/snapshot/source.go) 的 `Resolve` 使用 `git rev-parse --verify` 解析 commit 和 tree，并记录 module 目录相对 Git 根目录的位置。`OpenRevision` 用 `GIT_INDEX_FILE` 指向的私有 index 执行 `git read-tree`，再用 `git checkout-index --stdin --prefix` 把完整 tree 导出到临时目录。写入几千个文件受文件系统调用限制，所以先建好全部目录，再按目录把文件分给最多 8 个 `checkout-index` 进程并行写入；目录名只差大小写的文件分在同一个进程，大小写不敏感的文件系统上冲突仍按 index 顺序处理：
 
 - 不注册 worktree，也不修改仓库自己的 index，因此进程被中断时不会在 `.git` 中留下记录。
 - `checkout-index` 不触发 hook。
 - `-c core.sparseCheckout=false` 保证即使用户仓库启用了 sparse-checkout，导出的仍是整棵 tree。
 - `GIT_LFS_SKIP_SMUDGE=1` 让 LFS 文件保持 pointer，分析不需要下载 LFS 内容。
 
-导出保留整个仓库的目录结构，使同仓库本地 `replace` 和父目录中的 `go.work` 仍然有效。每次导出使用独立 index，old/new 可以并发导出。`Source.Close` 删除临时目录。如果 old/new 指向同一个 Git tree，只构建一次 package snapshot。
+导出保留整个仓库的目录结构，使同仓库本地 `replace` 和父目录中的 `go.work` 仍然有效。每次导出使用独立 index，old/new 可以并发导出。`Source.Close` 并发删除顶层目录后再删除临时目录；分析在后台执行删除，同时继续保存 snapshot 和分析另一个 revision，返回前等待删除完成并报告错误。如果 old/new 指向同一个 Git tree，只构建一次 package snapshot。
 
 ## 2. PackageSnapshot
 
@@ -51,6 +51,8 @@ flowchart LR
 1. 用 `golang.org/x/tools/go/packages` 读取元数据：文件、import 图、module、embed、测试变体和类型大小。不请求类型，`go list` 因此不带 `-export`，不编译任何 package。
 2. 匹配 `./...` 的 package 和它们用到的测试变体从源码类型检查；其余 package 都是依赖，再用一次 go/packages 只为它们读取 export data。`go list -export` 只编译这些依赖，同一版本编译一次后由 Go 构建缓存复用；同一次加载内的依赖共享类型对象。标准库和第三方库因此只作为类型契约，不遍历函数体。
 3. 本地 package 按 import 顺序并发地用 `go/types` 检查，同一文件在各测试变体间只解析一次；只为测试重新编译、不参与分析的变体跳过函数体。
+
+读取元数据和准备依赖的 export data 各要 `go list` 花一秒左右，两者同时进行：加载开始时先并发解析 module 中的 Go 文件（跳过 `vendor`、`testdata`、`.`/`_` 开头的目录和嵌套 module，未指定 `-tests` 时跳过测试文件），把其中不属于本 module 的 import 当作依赖的预测，立即开始加载它们的 export data。元数据返回后核对实际依赖；预测漏掉任何依赖或对应 package 有错误时，丢弃预测结果，按实际依赖重新加载一次，保证所有依赖的类型对象来自同一次加载。预先解析的文件进入同一个解析缓存，类型检查时直接复用。
 
 go/packages 自己做类型检查时，`go list -export` 会连本地 package 一起编译，而这些 package 随后仍要从源码检查。约 3000 个 Go 文件的仓库上，这部分编译占了冷分析的大部分时间，也让 Go 构建缓存持续增长，所以只让 go/packages 负责元数据和依赖的 export data。两次 `go list` 都带 `-trimpath`，使 cgo 输出和依赖的编译结果与导出目录无关，能跨运行、跨 tree 复用；`-trimpath` 只改变 cgo 生成文件 `//line` 中记录的路径（变为 module 路径形式），这些路径在不同导出之间同样稳定。实际文件由当前 Go toolchain、`GOOS`、`GOARCH`、build tags 和 CGo 配置决定。
 
@@ -79,7 +81,7 @@ example.com/app/payment::init::payment/init.go::0
 
 ### 语义 hash
 
-- 普通声明通过 `ast.Fprint` 计算 hash，过滤源码位置、普通注释和 parser 内部对象链接；常量使用完整类型和精确值。
+- 普通声明的 hash 由 [`internal/impact/asthash.go`](../internal/impact/asthash.go) 计算：按反射遍历语法树，写入每个节点的类型和其余字段的值，过滤源码位置、普通注释和 parser 内部对象链接。它覆盖的字段与 `ast.Fprint` 相同，但写紧凑的二进制而不是格式化文本，快一个数量级。只有两个位置字段带语义，记录“是否存在”：调用中的 `...`（`f(xs...)` 与 `f(xs)`）和类型别名的 `=`（`type A = B` 与 `type A B`）。常量使用完整类型和精确值。
 - struct 字段和 interface 方法是独立 symbol，成员变化不会自动污染整个类型的所有使用者。
 - [`internal/impact/buildmeta.go`](../internal/impact/buildmeta.go) 把 CGo preamble 和影响构建的 `//go:` 指令加入 hash。
 - [`internal/impact/embed.go`](../internal/impact/embed.go) 为 `go:embed` 文件建立 content-hash symbol，并连接到对应变量。
@@ -157,11 +159,22 @@ module 信息来自构建 package snapshot 时的同一次元数据加载，保�
 
 ## 8. 并发与内存边界
 
-[`internal/impact/concurrency.go`](../internal/impact/concurrency.go) 的 `parallelFor` 最多启动 `GOMAXPROCS` 个 worker，并按输入序号保存错误。它用于解析 old/new revision、package 摘要、声明 hash 与基础依赖计算，以及逐 package 构建和扫描 SSA。
+[`internal/impact/concurrency.go`](../internal/impact/concurrency.go) 的 `parallelFor` 最多启动 `GOMAXPROCS` 个 worker，并按输入序号保存错误。它用于解析 old/new revision、预先解析 module 文件、package 摘要、声明 hash 与基础依赖计算、动态方法收集、类型契约、逐 package 构建和扫描 SSA、写入和读取 snapshot 分块。
 
-old/new package snapshot 依次加载：构建一个 snapshot 已经会用满所有 CPU，同时构建两个只会让峰值内存翻倍；缓存命中很快，顺序加载几乎没有代价。一次 snapshot 中，每个声明只建立一次；传播阶段使用共享 `affected` set，因此多个变更依赖同一个声明时不会重复遍历该声明。
+构建一个 snapshot 时，以下步骤互相重叠：
 
-主 package graph 不请求第三方 `NeedDeps`，持久化 snapshot 不保存 AST 或 SSA。冷分析的内存峰值来自同时持有当前 module（指定 `-tests` 时含测试变体）的 AST、`types.Info` 和依赖的类型信息；SSA 的 `Function` 会一直引用自己的语法节点和所在 package 的 `types.Info`，所以这些数据在扫描结束前无法提前释放。约 3000 个 Go 文件的 module 冷分析时存活堆约 400–500 MB。
+| 并发进行 | 依赖关系 |
+| --- | --- |
+| 元数据 `go list` 与“预先解析文件 + 预测依赖的 export data” | 元数据返回后等待预测结果并核对 |
+| module 快照与 package 摘要、声明汇总 | 只读已定型的元数据，组装结果前等待 |
+| SSA 转换扫描与声明 hash、初始化依赖、动态方法、类型契约 | 在 `objectIDs` 定型后开始，合并进 `symbols` 前等待 |
+| 删除导出目录与保存 snapshot、分析另一个 revision | 分析返回前等待 |
+
+并发代码遵循同一套约束：共享的 AST、`types.Info`、元数据图和 `objectIDs` 在并发阶段开始前定型，之后只读；worker 只写自己下标对应的结果槽位，合并在所有 worker 结束后串行进行；需要共享写入的地方（解析缓存、后台删除的错误）用互斥锁保护；等待都放在 `defer` 中，提前返回时也不会留下仍在运行的 goroutine 或 `go list` 进程。所有测试都在 `-race` 下运行通过。
+
+old/new package snapshot 依次构建：构建一个 snapshot 已经会用满所有 CPU，同时构建两个只会让峰值内存翻倍；缓存命中很快，顺序加载几乎没有代价。一次 snapshot 中，每个声明只建立一次；传播阶段使用共享 `affected` set，因此多个变更依赖同一个声明时不会重复遍历该声明。
+
+依赖只加载元数据和 export data，不解析源码；持久化 snapshot 不保存 AST 或 SSA。冷分析的内存峰值来自同时持有当前 module（指定 `-tests` 时含测试变体）的 AST、`types.Info` 和依赖的类型信息；SSA 的 `Function` 会一直引用自己的语法节点和所在 package 的 `types.Info`，所以这些数据在扫描结束前无法提前释放。约 3000 个 Go 文件的 module 冷分析时存活堆约 400–500 MB。
 
 ## 9. 代码与测试入口
 
@@ -172,6 +185,7 @@ old/new package snapshot 依次加载：构建一个 snapshot 已经会用满所
 | 加载与类型检查 | [`internal/impact/load.go`](../internal/impact/load.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | package snapshot/hash/测试变体 | [`internal/impact/snapshot.go`](../internal/impact/snapshot.go) | [`internal/impact/snapshot_test.go`](../internal/impact/snapshot_test.go)、[`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
 | 声明与依赖 | [`internal/impact/symbol.go`](../internal/impact/symbol.go) | [`internal/impact/analyzer_test.go`](../internal/impact/analyzer_test.go) |
+| 语法 hash | [`internal/impact/asthash.go`](../internal/impact/asthash.go) | [`internal/impact/snapshot_test.go`](../internal/impact/snapshot_test.go) |
 | 类型契约与接口转换 | [`internal/impact/contract.go`](../internal/impact/contract.go) | [`internal/impact/interface_flow_test.go`](../internal/impact/interface_flow_test.go) |
 | module/workspace | [`internal/impact/module.go`](../internal/impact/module.go) | [`internal/impact/module_test.go`](../internal/impact/module_test.go) |
 | CGo/编译指令 | [`internal/impact/buildmeta.go`](../internal/impact/buildmeta.go) | [`internal/impact/buildmeta_test.go`](../internal/impact/buildmeta_test.go) |
