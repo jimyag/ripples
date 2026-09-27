@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"os/exec"
 	pathpkg "path"
@@ -178,6 +177,8 @@ func checkoutTree(ctx context.Context, gitRoot string, env []string, root string
 	entries := strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00")
 	workers := max(1, min(runtime.GOMAXPROCS(0), 8, len(entries)/128))
 	groups := make([][]string, workers)
+	// Directories take turns across the groups, keyed case-insensitively.
+	slots := make(map[string]int)
 	dirs := map[string]bool{".": true}
 	for _, entry := range entries {
 		// Each entry is "<mode> <object> <stage>\t<path>".
@@ -192,10 +193,13 @@ func checkoutTree(ctx context.Context, gitRoot string, env []string, root string
 		}
 		dir := pathpkg.Dir(path)
 		dirs[dir] = true
-		group := fnv.New32a()
-		_, _ = group.Write([]byte(strings.ToLower(dir)))
-		index := group.Sum32() % uint32(workers)
-		groups[index] = append(groups[index], path)
+		key := strings.ToLower(dir)
+		slot, ok := slots[key]
+		if !ok {
+			slot = len(slots) % workers
+			slots[key] = slot
+		}
+		groups[slot] = append(groups[slot], path)
 	}
 	for dir := range dirs {
 		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(dir)), 0o750); err != nil {
