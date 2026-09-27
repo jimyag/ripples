@@ -133,7 +133,7 @@ task ci
 
 ## Release
 
-Pushing a `v*` tag runs GoReleaser and uploads raw platform binaries plus `checksums.txt` without tar or zip archives. Run `task release-snapshot` before publishing to validate the configuration and local artifacts.
+Pushing a `v*` tag runs GoReleaser and uploads raw platform binaries plus `checksums.txt` without tar or zip archives. Release notes list commits since the previous tag. Run `task release-snapshot` before publishing to validate the configuration and local artifacts.
 
 ## License
 
