@@ -50,7 +50,7 @@ flowchart LR
 
 1. 用 `golang.org/x/tools/go/packages` 读取元数据：文件、import 图、module、embed 和测试变体。不请求类型，`go list` 因此不带 `-export`，不编译任何 package；默认也不带 `-compiled`，它要为图中每个 package 计算构建 hash 来找 cgo 生成的文件，约占元数据加载的三分之一，只有 module 中有文件 import `"C"` 时才加上。类型大小来自导出目录中的 `go env GOARCH`。
 2. 匹配 `./...` 的 package 和它们用到的测试变体从源码类型检查；其余 package 都是依赖，再用一次 go/packages 取得它们的 export data 文件，由 `gcexportdata` 读入同一个 import map，同一次加载内的依赖因此共享类型对象。让 go/packages 直接读取类型会额外计算 compiled 文件并列出全部间接依赖，加载多花约五分之一的时间。`go list -export` 只编译这些依赖，同一版本编译一次后由 Go 构建缓存复用。标准库和第三方库因此只作为类型契约，不遍历函数体。
-3. 本地 package 按 import 顺序并发地用 `go/types` 检查，同一文件在各测试变体间只解析一次；只为测试重新编译、不参与分析的变体跳过函数体。
+3. 本地 package 按 import 顺序并发地用 `go/types` 检查，同一文件在各测试变体间只解析一次；为测试重新编译的依赖与普通 package 文件相同，跳过函数体。
 
 读取元数据和准备依赖的 export data 是加载中最慢的两步，各是一次 `go list`，所以重叠进行：元数据加载一开始就启动；同时并发解析 module 中的 Go 文件（跳过 `vendor`、`testdata`、`.`/`_` 开头的目录和嵌套 module，未指定 `-tests` 时跳过测试文件），把其中不属于本 module 的 import 当作依赖的预测，立即开始加载它们的 export data。预先解析覆盖 `go list` 对 `./...` 可能列出的所有文件；其中有文件 import `"C"` 时，取消已启动的元数据加载，改为带 `-compiled` 重新加载。元数据返回后核对实际依赖；预测漏掉任何依赖或对应 package 有错误时，丢弃预测结果，按实际依赖重新加载一次，保证所有依赖的类型对象来自同一次加载。预先解析的文件进入同一个解析缓存，类型检查时直接复用。
 
@@ -58,12 +58,13 @@ go/packages 自己做类型检查时，`go list -export` 会连本地 package �
 
 只有指定 `-tests` 时才加载测试变体。默认结果用于构建和部署，不需要测试文件；测试文件往往比非测试代码更多，加载它们会让冷分析明显变慢。`-tests` 进入缓存 key，两种模式的 snapshot 互不复用。
 
-测试加载会返回同一 package 的多个变体：普通 package `p`、包含 `_test.go` 的 `p [p.test]`、外部测试 package `p_test [p.test]`，以及为测试重新编译的依赖 `q [p.test]`。生成的测试 main 被丢弃；前三种参与分析，`q [p.test]` 只做类型检查供导入使用：
+测试加载会返回同一 package 的多个变体：普通 package `p`、包含 `_test.go` 的 `p [p.test]`、外部测试 package `p_test [p.test]`，以及为测试重新编译的依赖 `q [p.test]`。生成的测试 main 被丢弃；前三种参与分析，`q [p.test]` 的文件与普通 `q` 相同，只登记类型对象并建立初始化边：
 
 - `reportPath` 把内部测试变体和外部测试 package 归到被测 package，重新编译的依赖保留自己的路径。
-- 同一声明在各变体中得到相同 ID，合并为一个 symbol；各变体的类型对象都会登记，外部测试引用的对象也能解析。
+- 同一声明在各变体中得到相同 ID，合并为一个 symbol；包括 `q [p.test]` 在内，各变体的类型对象都登记为同一 ID，测试代码经重新编译的副本引用的声明也能传播到被测 package。
+- `q [p.test]` 只在 `p` 的测试二进制中初始化：它的 package-init symbol 归属 `p`，依赖普通 `q` 的 package-init 和它导入的变体，所以 `q` 的初始化变化会传到 `p` 的测试，`p` 的测试专用初始化不会传到 `q`。它声明的接口按本地接口处理，只有真正被调用的方法才算动态可达。
 - 每个变体都有自己的一份类型，一份类型只实现同一变体中声明的接口，所以各份能收到的动态调用不同；它们的类型契约 symbol 合并为一个：依赖取并集，只经本地接口调用的方法合并各份的调用者。
-- 同一个 package 的各变体合并为一个 `Package`，hash 覆盖全部变体，名称取自普通 package。
+- 同一个 package 的各变体合并为一个 `Package`，hash 覆盖全部变体（`q [p.test]` 的文件已由普通 `q` 覆盖，不计入），名称取自普通 package。
 
 解析器保留注释供编译指令和 `go:embed` 处理，同时跳过旧的 parser object resolution。
 

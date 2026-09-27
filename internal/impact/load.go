@@ -24,8 +24,10 @@ import (
 	gopackages "golang.org/x/tools/go/packages"
 )
 
-// loadPackages returns the packages matching ./... in dir, with syntax and
-// type information, and the metadata of every package they depend on.
+// loadPackages returns the packages matching ./... in dir and, with tests,
+// their test variants and the packages recompiled for those tests, all with
+// syntax and type information and the metadata of every package they depend
+// on.
 //
 // go/packages can type-check them too, but it then runs go list -export,
 // which compiles every listed package, including the module's own packages
@@ -167,7 +169,7 @@ func loadPackages(ctx context.Context, dir string, tests bool) ([]*gopackages.Pa
 	}); err != nil {
 		return nil, err
 	}
-	return roots, nil
+	return source, nil
 }
 
 // loadMetadata lists the packages matching ./..., without test mains, and

@@ -24,16 +24,25 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 	var (
 		declarations  []symbolDeclaration
 		localPackages []*gopackages.Package
+		recompiled    []*gopackages.Package
 	)
 	// A package's test variants repeat its declarations with the same IDs, so
-	// they collapse into one symbol while still registering their objects.
+	// they collapse into one symbol while still registering their objects. A
+	// package recompiled for another package's test repeats the plain package
+	// entirely: it only registers its objects, so test code using them
+	// reaches the plain declarations, and gets its own initialization.
 	for _, pkg := range loaded {
 		if _, local := packages[reportPath(pkg)]; !local {
 			continue
 		}
-		localPackages = append(localPackages, pkg)
 		reportPaths[pkg.Types] = reportPath(pkg)
-		declarations = append(declarations, packageDeclarations(root, pkg, objectIDs)...)
+		pkgDeclarations := packageDeclarations(root, pkg, objectIDs)
+		if isRecompiled(pkg) {
+			recompiled = append(recompiled, pkg)
+			continue
+		}
+		localPackages = append(localPackages, pkg)
+		declarations = append(declarations, pkgDeclarations...)
 	}
 	nonGoInputs, err := nonGoInputSymbols(root, localPackages)
 	if err != nil {
@@ -102,8 +111,11 @@ func summarizeSymbols(root string, loaded []*gopackages.Package, packages map[st
 	if err := addEmbedDependencies(root, localPackages, objectIDs, symbols); err != nil {
 		return nil, err
 	}
-	addInitializationDependencies(localPackages, declarations, objectIDs, symbols)
-	addTypeContractSymbols(objectIDs, reportPaths, collectDynamicMethods(localPackages, declarations), symbols)
+	addInitializationDependencies(localPackages, recompiled, declarations, objectIDs, symbols)
+	// Interfaces of recompiled packages are local too: only calls make their
+	// methods dynamically reachable.
+	reachable := collectDynamicMethods(slices.Concat(localPackages, recompiled), declarations)
+	addTypeContractSymbols(objectIDs, reportPaths, reachable, symbols)
 	conversionsRun.Wait()
 	addConversionDependencies(conversions, symbols)
 	return symbols, nil
@@ -517,16 +529,33 @@ func sortedSet(values map[string]struct{}) []string {
 // package variant. It depends on the init functions and effectful variable
 // initializers in that variant's own files and on the package-init of its
 // local imports, so test-only initialization never reaches the importers of
-// the plain package.
+// the plain package. A package recompiled for a test runs the plain
+// package's initialization inside that test binary, so its package-init
+// depends on the plain one and belongs to the package under test.
 func addInitializationDependencies(
-	localPackages []*gopackages.Package,
+	localPackages, recompiled []*gopackages.Package,
 	declarations []symbolDeclaration,
 	objectIDs map[types.Object]string,
 	symbols map[string]Symbol,
 ) {
-	localIDs := make(map[string]bool, len(localPackages))
-	for _, pkg := range localPackages {
+	localIDs := make(map[string]bool, len(localPackages)+len(recompiled))
+	for _, pkg := range slices.Concat(localPackages, recompiled) {
 		localIDs[pkg.ID] = true
+	}
+	for _, pkg := range recompiled {
+		dependencies := map[string]struct{}{packageInitID(pkg.PkgPath): {}}
+		for _, imported := range pkg.Imports {
+			if localIDs[imported.ID] {
+				dependencies[packageInitID(imported.ID)] = struct{}{}
+			}
+		}
+		id := packageInitID(pkg.ID)
+		symbols[id] = Symbol{
+			ID:           id,
+			PackagePath:  pkg.ForTest,
+			Hash:         stableMarkerHash("package-init"),
+			Dependencies: sortedSet(dependencies),
+		}
 	}
 	initializers := make(map[*gopackages.Package][]string)
 	for _, declaration := range declarations {

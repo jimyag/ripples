@@ -1976,6 +1976,99 @@ func TestSummary(t *testing.T) { _ = report.Summary() }
 	assertPackages(t, got, []string{"order.order", "report.report"})
 }
 
+// order's external test imports report, which imports order, so go list
+// recompiles report for order's tests. The test binary uses that copy of
+// report: its declarations and initialization reach order's tests, while
+// order's test-only initialization does not reach report.
+func TestAnalyzeTracksPackagesRecompiledForTests(t *testing.T) {
+	baseFiles := map[string]string{
+		"order/order.go":       "package order\n\nfunc Total(a, b int) int { return a + b }\n",
+		"order/helper_test.go": "package order\n\nfunc init() { println(\"old\") }\n",
+		"report/report.go": `package report
+
+import "example.com/app/order"
+
+type Namer interface{ Name() string }
+
+func Summary() int { return order.Total(1, 2) }
+
+func init() { println("old") }
+`,
+		"order/summary_test.go": `package order_test
+
+import (
+	"testing"
+
+	"example.com/app/report"
+)
+
+func TestSummary(t *testing.T) { _ = report.Summary() }
+`,
+		"cmd/server/main.go": "package main\n\nimport _ \"example.com/app/report\"\n\nfunc main() {}\n",
+		"item/item.go":       "package item\n\ntype Item struct{}\n\nfunc (Item) Name() string { return \"old\" }\n\nfunc (Item) String() string { return \"item\" }\n",
+		"shop/shop.go": `package shop
+
+import (
+	"fmt"
+
+	"example.com/app/item"
+)
+
+func Label() fmt.Stringer { return item.Item{} }
+`,
+	}
+	tests := []struct {
+		name   string
+		file   string
+		change [2]string
+		want   []string
+	}{
+		{
+			name:   "declaration used by an external test",
+			file:   "report/report.go",
+			change: [2]string{"order.Total(1, 2)", "order.Total(2, 3)"},
+			want:   []string{"order.order", "report.report"},
+		},
+		{
+			name:   "initialization run by the test binary",
+			file:   "report/report.go",
+			change: [2]string{`println("old")`, `println("new")`},
+			want:   []string{"cmd/server.main", "order.order", "report.report"},
+		},
+		{
+			name:   "test-only initialization stays with the package under test",
+			file:   "order/helper_test.go",
+			change: [2]string{`println("old")`, `println("new")`},
+			want:   []string{"order.order"},
+		},
+		{
+			name:   "uncalled interface of a recompiled package",
+			file:   "item/item.go",
+			change: [2]string{`return "old"`, `return "new"`},
+			want:   []string{"item.item"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			for name, content := range baseFiles {
+				writeModuleFile(t, repo, name, content)
+			}
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, test.file, strings.Replace(baseFiles[test.file], test.change[0], test.change[1], 1))
+			newCommit := commitModule(t, repo, "new")
+
+			analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+			analyzer.Tests = true
+			got, err := analyzer.Analyze(t.Context(), repo, oldCommit, newCommit)
+			if err != nil {
+				t.Fatalf("Analyze() error = %v", err)
+			}
+			assertPackages(t, got, test.want)
+		})
+	}
+}
+
 func TestAnalyzeIgnoresTestFilesByDefault(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "order/order.go", "package order\n\nfunc Total(a, b int) int { return a + b }\n")

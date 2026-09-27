@@ -219,9 +219,11 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare 
 		Packages:   make(map[string]Package, len(loaded)),
 		Symbols:    make(map[string]Symbol),
 	}
-	summaries := make([]Package, len(loaded))
-	if err := parallelFor(len(loaded), func(index int) error {
-		pkg, err := summarizePackage(source.Dir, modulePath, loaded[index])
+	// Packages recompiled for a test repeat files the plain package covers.
+	analyzed := slices.DeleteFunc(slices.Clone(loaded), isRecompiled)
+	summaries := make([]Package, len(analyzed))
+	if err := parallelFor(len(analyzed), func(index int) error {
+		pkg, err := summarizePackage(source.Dir, modulePath, analyzed[index])
 		if err != nil {
 			return err
 		}
@@ -236,7 +238,7 @@ func buildPackageSnapshot(ctx context.Context, source *snapshot.Source, prepare 
 	ranks := make(map[string]int)
 	for index, pkg := range summaries {
 		variantHashes[pkg.Path] = append(variantHashes[pkg.Path], pkg.Hash)
-		rank := variantRank(loaded[index])
+		rank := variantRank(analyzed[index])
 		if best, ok := ranks[pkg.Path]; !ok || rank < best {
 			ranks[pkg.Path] = rank
 			result.Packages[pkg.Path] = pkg
@@ -304,6 +306,12 @@ func reportPath(pkg *gopackages.Package) string {
 		return pkg.ForTest
 	}
 	return pkg.PkgPath
+}
+
+// isRecompiled reports a package go list recompiled for another package's
+// test, which repeats the files of the plain package.
+func isRecompiled(pkg *gopackages.Package) bool {
+	return pkg.ForTest != "" && reportPath(pkg) != pkg.ForTest
 }
 
 // variantRank orders the variants of one reported package so its name comes
