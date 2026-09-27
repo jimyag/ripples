@@ -62,6 +62,7 @@ Loading tests returns several variants of a package: the plain package `p`, `p [
 
 - `reportPath` reports in-package test variants and external test packages as the package under test, while recompiled dependencies keep their own path.
 - A declaration gets the same ID in every variant, so the variants collapse into one symbol, while the type objects of every variant are registered and references from external tests resolve.
+- Every variant has its own copy of each type, and a copy only implements the interfaces declared in the same variant, so the copies can receive different dynamic calls. Their type contract symbols merge into one: the union of their dependencies, and for methods called only through local interfaces, the callers of every copy.
 - The variants of one package merge into one `Package` whose hash covers all of them and whose name comes from the plain package.
 
 The parser retains comments for compiler directives and `go:embed`, while skipping legacy parser object resolution.

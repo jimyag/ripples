@@ -2008,6 +2008,54 @@ func TestAnalyzeKeepsTestAndNonTestSnapshotsApart(t *testing.T) {
 	}
 }
 
+// With tests, a package's test variant declares its own copy of each type,
+// and a copy implements only the interfaces declared against the same copy.
+// The dispatch contract combines the calls every copy can receive instead of
+// keeping whichever copy came last.
+func TestLoadSnapshotMergesDispatchContractsOfTestVariants(t *testing.T) {
+	repo := initModule(t)
+	writeModuleFile(t, repo, "price/price.go", `package price
+
+type Money int
+
+type Price struct{}
+
+func (Price) Amount() Money { return 1 }
+`)
+	writeModuleFile(t, repo, "price/price_test.go", `package price
+
+type amounter interface{ Amount() Money }
+
+func total(v amounter) Money { return v.Amount() }
+`)
+	writeModuleFile(t, repo, "invoice/invoice.go", `package invoice
+
+import "example.com/app/price"
+
+type amounter interface{ Amount() price.Money }
+
+func Total(v amounter) price.Money { return v.Amount() }
+`)
+	commitModule(t, repo, "initial")
+
+	analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+	analyzer.Tests = true
+	loaded, err := analyzer.LoadSnapshot(t.Context(), repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []DynamicDependency{{
+		ID: "example.com/app/price::method::Price.Amount",
+		Callers: []string{
+			"example.com/app/invoice::func::Total",
+			"example.com/app/price::func::total",
+		},
+	}}
+	if got := loaded.Symbols["example.com/app/price::dispatch::Price"].Dynamic; !reflect.DeepEqual(got, want) {
+		t.Fatalf("dispatch contract of Price has dynamic dependencies %+v, want %+v", got, want)
+	}
+}
+
 func TestAnalyzePropagatesParentGoWorkReplacement(t *testing.T) {
 	repo := initModule(t)
 	if err := os.Remove(filepath.Join(repo, "go.mod")); err != nil {

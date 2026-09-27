@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"slices"
 
 	gopackages "golang.org/x/tools/go/packages"
@@ -273,11 +274,37 @@ func addTypeContractSymbols(
 		built[index] = typeContractSymbols(named[index], objectIDs, reportPaths, reachable)
 		return nil
 	})
+	// Test variants declare their own copies of a package's types, and a copy
+	// implements only the interfaces declared against the same copy, so the
+	// copies can receive different dynamic calls. Their symbols are merged.
 	for _, typeSymbols := range built {
 		for _, symbol := range typeSymbols {
+			if existing, ok := symbols[symbol.ID]; ok {
+				symbol = mergeContractSymbols(existing, symbol)
+			}
 			symbols[symbol.ID] = symbol
 		}
 	}
+}
+
+// mergeContractSymbols combines the symbols two copies of a type produce: the
+// dependencies of either and, for each method only interface calls in local
+// declarations reach, the callers of either.
+func mergeContractSymbols(existing, added Symbol) Symbol {
+	existing.Dependencies = mergeDependencies(existing.Dependencies, added.Dependencies)
+	callers := make(map[string][]string)
+	for _, dynamic := range slices.Concat(existing.Dynamic, added.Dynamic) {
+		callers[dynamic.ID] = append(callers[dynamic.ID], dynamic.Callers...)
+	}
+	existing.Dynamic = nil
+	for _, id := range slices.Sorted(maps.Keys(callers)) {
+		if _, unconditional := slices.BinarySearch(existing.Dependencies, id); unconditional {
+			continue
+		}
+		slices.Sort(callers[id])
+		existing.Dynamic = append(existing.Dynamic, DynamicDependency{ID: id, Callers: slices.Compact(callers[id])})
+	}
+	return existing
 }
 
 // typeContractSymbols returns the layout, contract and dispatch symbols of a

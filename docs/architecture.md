@@ -62,6 +62,7 @@ go/packages 自己做类型检查时，`go list -export` 会连本地 package �
 
 - `reportPath` 把内部测试变体和外部测试 package 归到被测 package，重新编译的依赖保留自己的路径。
 - 同一声明在各变体中得到相同 ID，合并为一个 symbol；各变体的类型对象都会登记，外部测试引用的对象也能解析。
+- 每个变体都有自己的一份类型，一份类型只实现同一变体中声明的接口，所以各份能收到的动态调用不同；它们的类型契约 symbol 合并为一个：依赖取并集，只经本地接口调用的方法合并各份的调用者。
 - 同一个 package 的各变体合并为一个 `Package`，hash 覆盖全部变体，名称取自普通 package。
 
 解析器保留注释供编译指令和 `go:embed` 处理，同时跳过旧的 parser object resolution。
