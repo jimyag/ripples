@@ -2,6 +2,7 @@ package impact
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -9,9 +10,9 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	pathpkg "path"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"sync"
 
 	"golang.org/x/mod/modfile"
+	"golang.org/x/tools/go/gcexportdata"
 	gopackages "golang.org/x/tools/go/packages"
 )
 
@@ -41,47 +43,70 @@ func loadPackages(ctx context.Context, dir string, tests bool) ([]*gopackages.Pa
 		files: make(map[string]*parsedFile),
 	}
 
-	// Reading the metadata and preparing the dependencies' export data each
-	// take go list about a second. Both run at once: the module's files are
-	// parsed right away and the export data of everything they import is
-	// loaded while the metadata is read. The metadata then confirms the
-	// dependencies, and a guess that missed one falls back to an exact load.
+	// Reading the metadata and preparing the dependencies' export data are
+	// the slowest steps, each a go list run, so they overlap: the metadata
+	// load starts right away, and the export data of everything the
+	// module's files import is loaded as soon as the files are parsed. The
+	// metadata then confirms the dependencies, and a guess that missed one
+	// falls back to an exact load.
+	var (
+		sizes    types.Sizes
+		sizesErr error
+		sizesRun sync.WaitGroup
+	)
+	sizesRun.Go(func() { sizes, sizesErr = targetSizes(ctx, dir) })
+	defer sizesRun.Wait()
+
+	// go list -compiled hashes every package in the graph to find the files
+	// cgo generates, which made up a third of the metadata load. Only cgo
+	// packages have such files, so the metadata leaves them out and is loaded
+	// again with them when a file of the module imports "C". parseModule
+	// reads every file go list can report for ./..., and a cgo file it missed
+	// would still fail type-checking at import "C" instead of going unnoticed.
+	quickCtx, cancelQuick := context.WithCancel(ctx)
+	var (
+		quick    []*gopackages.Package
+		quickErr error
+		quickRun sync.WaitGroup
+	)
+	quickRun.Go(func() { quick, quickErr = loadMetadata(quickCtx, dir, buildFlags, tests, false) })
+	defer quickRun.Wait()
+	defer cancelQuick()
+
+	imports, cgo := checker.parseModule(dir, tests)
 	guessCtx, cancelGuess := context.WithCancel(ctx)
 	var (
 		guessed    map[string]*gopackages.Package
 		guessedRun sync.WaitGroup
 	)
-	guessedRun.Go(func() {
-		if imports := checker.parseModule(dir, tests); len(imports) > 0 {
-			guessed = loadExportData(guessCtx, dir, buildFlags, imports)
-		}
-	})
+	if len(imports) > 0 {
+		guessedRun.Go(func() {
+			loaded, err := loadExportData(guessCtx, dir, buildFlags, imports)
+			if err != nil {
+				return
+			}
+			guessed = make(map[string]*gopackages.Package, len(loaded))
+			for _, pkg := range loaded {
+				guessed[pkg.ID] = pkg
+			}
+		})
+	}
 	defer guessedRun.Wait()
 	defer cancelGuess()
 
-	metadata, err := gopackages.Load(&gopackages.Config{
-		Context: ctx,
-		Dir:     dir,
-		Mode: gopackages.NeedName |
-			gopackages.NeedFiles |
-			gopackages.NeedCompiledGoFiles |
-			gopackages.NeedImports |
-			gopackages.NeedDeps |
-			gopackages.NeedModule |
-			gopackages.NeedEmbedFiles |
-			gopackages.NeedForTest |
-			gopackages.NeedTypesSizes,
-		// With tests, test variants and external test packages are analyzed so
-		// test-only changes and declarations used by tests reach their packages.
-		Tests:      tests,
-		BuildFlags: buildFlags,
-	}, "./...")
-	if err != nil {
-		return nil, fmt.Errorf("load package graph: %w", err)
+	var (
+		roots []*gopackages.Package
+		err   error
+	)
+	if cgo {
+		cancelQuick()
+		roots, err = loadMetadata(ctx, dir, buildFlags, tests, true)
+	} else {
+		quickRun.Wait()
+		roots, err = quick, quickErr
 	}
-	roots := slices.DeleteFunc(metadata, isTestMain)
-	if len(roots) == 0 {
-		return nil, fmt.Errorf("no Go packages found")
+	if err != nil {
+		return nil, err
 	}
 
 	// Roots and the test variants they reach are type-checked from source;
@@ -104,6 +129,9 @@ func loadPackages(ctx context.Context, dir string, tests bool) ([]*gopackages.Pa
 		}
 		sourceIDs[pkg.ID] = true
 		source = append(source, pkg)
+		if !cgo {
+			pkg.CompiledGoFiles = pkg.GoFiles
+		}
 		for _, imported := range pkg.Imports {
 			visit(imported)
 		}
@@ -121,10 +149,11 @@ func loadPackages(ctx context.Context, dir string, tests bool) ([]*gopackages.Pa
 		}
 	}
 
-	checker.sizes = roots[0].TypesSizes
-	if checker.sizes == nil {
-		checker.sizes = types.SizesFor("gc", runtime.GOARCH)
+	sizesRun.Wait()
+	if sizesErr != nil {
+		return nil, sizesErr
 	}
+	checker.sizes = sizes
 	checker.isRoot = isRoot
 	checker.states = make(map[string]*checkState, len(source))
 	for _, pkg := range source {
@@ -141,18 +170,66 @@ func loadPackages(ctx context.Context, dir string, tests bool) ([]*gopackages.Pa
 	return roots, nil
 }
 
+// loadMetadata lists the packages matching ./..., without test mains, and
+// the metadata of everything they import. compiled adds the files cgo
+// generates.
+func loadMetadata(ctx context.Context, dir string, buildFlags []string, tests, compiled bool) ([]*gopackages.Package, error) {
+	// NeedTypesSizes would also make go list compute the compiled files, so
+	// the sizes come from targetSizes.
+	mode := gopackages.NeedName |
+		gopackages.NeedFiles |
+		gopackages.NeedImports |
+		gopackages.NeedDeps |
+		gopackages.NeedModule |
+		gopackages.NeedEmbedFiles |
+		gopackages.NeedForTest
+	if compiled {
+		mode |= gopackages.NeedCompiledGoFiles
+	}
+	metadata, err := gopackages.Load(&gopackages.Config{
+		Context: ctx,
+		Dir:     dir,
+		Mode:    mode,
+		// With tests, test variants and external test packages are analyzed so
+		// test-only changes and declarations used by tests reach their packages.
+		Tests:      tests,
+		BuildFlags: buildFlags,
+	}, "./...")
+	if err != nil {
+		return nil, fmt.Errorf("load package graph: %w", err)
+	}
+	roots := slices.DeleteFunc(metadata, isTestMain)
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("no Go packages found")
+	}
+	return roots, nil
+}
+
+// targetSizes returns the type sizes of the architecture the go command
+// builds for in dir.
+func targetSizes(ctx context.Context, dir string) (types.Sizes, error) {
+	cmd := exec.CommandContext(ctx, "go", "env", "GOARCH")
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go env GOARCH: %w", err)
+	}
+	return types.SizesFor("gc", strings.TrimSpace(string(output))), nil
+}
+
 // parseModule parses the Go files of the module in dir, which the metadata
 // will list later, and returns the import paths outside the module's own
-// packages. It is a guess: files excluded by build constraints are included,
-// and parse errors surface only if the metadata lists the file.
-func (c *sourceChecker) parseModule(dir string, tests bool) []string {
+// packages and whether a file imports "C". It is a guess: files excluded by
+// build constraints are included, and parse errors surface only if the
+// metadata lists the file.
+func (c *sourceChecker) parseModule(dir string, tests bool) (imports []string, cgo bool) {
 	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	modulePath := modfile.ModulePath(data)
 	if modulePath == "" {
-		return nil
+		return nil, false
 	}
 	var files []string
 	local := map[string]bool{"C": true, "unsafe": true}
@@ -188,7 +265,7 @@ func (c *sourceChecker) parseModule(dir string, tests bool) []string {
 		return nil
 	})
 
-	imports := make([][]string, len(files))
+	perFile := make([][]string, len(files))
 	_ = parallelFor(len(files), func(index int) error {
 		file, _ := c.parse(files[index])
 		if file == nil {
@@ -196,44 +273,73 @@ func (c *sourceChecker) parseModule(dir string, tests bool) []string {
 		}
 		for _, spec := range file.Imports {
 			if path, err := strconv.Unquote(spec.Path.Value); err == nil {
-				imports[index] = append(imports[index], path)
+				perFile[index] = append(perFile[index], path)
 			}
 		}
 		return nil
 	})
 	guessed := make(map[string]bool)
-	for _, fileImports := range imports {
+	for _, fileImports := range perFile {
 		for _, path := range fileImports {
 			if path == "C" {
 				// cgo output imports these on behalf of the file.
 				guessed["runtime/cgo"] = true
 				guessed["syscall"] = true
+				cgo = true
 			}
 			if !local[path] {
 				guessed[path] = true
 			}
 		}
 	}
-	return slices.Sorted(maps.Keys(guessed))
+	return slices.Sorted(maps.Keys(guessed)), cgo
 }
 
-// loadExportData loads the types of paths from export data, keyed by package
-// ID, or returns nil if go list fails.
-func loadExportData(ctx context.Context, dir string, buildFlags, paths []string) map[string]*gopackages.Package {
+// loadExportData lists paths with go list -export and reads the types of
+// every package that built. One import map serves all of them, so they share
+// the objects of the packages they refer to. Asking go/packages for the
+// types took about a fifth longer: it also has go list compute compiled
+// files and report every transitive dependency.
+func loadExportData(ctx context.Context, dir string, buildFlags, paths []string) ([]*gopackages.Package, error) {
 	loaded, err := gopackages.Load(&gopackages.Config{
 		Context:    ctx,
 		Dir:        dir,
-		Mode:       gopackages.NeedName | gopackages.NeedTypes,
+		Mode:       gopackages.NeedName | gopackages.NeedExportFile,
 		BuildFlags: buildFlags,
 	}, paths...)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	byID := make(map[string]*gopackages.Package, len(loaded))
+	fset := token.NewFileSet()
+	imports := make(map[string]*types.Package)
 	for _, pkg := range loaded {
-		byID[pkg.ID] = pkg
+		if pkg.ExportFile == "" || len(pkg.Errors) > 0 {
+			continue
+		}
+		if pkg.Types, err = readExportFile(fset, imports, pkg); err != nil {
+			return nil, err
+		}
 	}
-	return byID
+	return loaded, nil
+}
+
+func readExportFile(fset *token.FileSet, imports map[string]*types.Package, pkg *gopackages.Package) (_ *types.Package, returnErr error) {
+	file, err := os.Open(pkg.ExportFile)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, file.Close())
+	}()
+	reader, err := gcexportdata.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("read export data of %s: %w", pkg.PkgPath, err)
+	}
+	typesPackage, err := gcexportdata.Read(reader, fset, imports, pkg.PkgPath)
+	if err != nil {
+		return nil, fmt.Errorf("read export data of %s: %w", pkg.PkgPath, err)
+	}
+	return typesPackage, nil
 }
 
 // useExportData takes the dependencies' types from a guessed load if it
@@ -258,18 +364,7 @@ func loadDependencyTypes(ctx context.Context, dir string, buildFlags []string, d
 	if len(dependencies) == 0 {
 		return nil
 	}
-	loaded, err := gopackages.Load(&gopackages.Config{
-		Context:    ctx,
-		Dir:        dir,
-		Mode:       gopackages.NeedName | gopackages.NeedTypes,
-		BuildFlags: buildFlags,
-	}, slices.Sorted(func(yield func(string) bool) {
-		for id := range dependencies {
-			if !yield(id) {
-				return
-			}
-		}
-	})...)
+	loaded, err := loadExportData(ctx, dir, buildFlags, slices.Sorted(maps.Keys(dependencies)))
 	if err != nil {
 		return fmt.Errorf("load dependency types: %w", err)
 	}
