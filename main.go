@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +21,16 @@ import (
 )
 
 func main() {
+	// go/types in this binary cannot read export data written by another Go
+	// release, so every go command ripples starts, -prepare included, runs
+	// the release the binary was built with; the go command downloads it when
+	// it is missing.
+	if version := strings.Fields(runtime.Version())[0]; strings.HasPrefix(version, "go1.") {
+		if err := os.Setenv("GOTOOLCHAIN", version); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "select Go toolchain: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	// Cancel on Ctrl-C or CI job cancellation so temporary exports are removed.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)

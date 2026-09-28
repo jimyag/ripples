@@ -88,6 +88,7 @@ jobs:
 - `RIPPLES_CACHE` must be an absolute path. The example uses the runner's temporary directory and restores it through `actions/cache`. `RIPPLES_CACHE_MAX_MB` (1024 by default) bounds the total cache size and therefore what `actions/cache` saves.
 - The `simple` output contains one `<relative path>.<package name>` per line, which can be mapped to binaries, services, labels, or test jobs with `grep -Fxq`; deleted packages never appear in `simple` output. `_test.go` files are not analyzed by default; add `-tests` when the result selects test jobs, so a pull request that only changes tests still reports its package.
 - When the repository relies on generated code that it does not commit, add `-prepare 'go generate ./...'` or the matching generator command to the analysis step, and install the generators on the runner.
+- ripples runs `go` commands with the Go version built into the release binary (`goVersion` in `ripples --version`), and downloads it when the runner has a different Go version; to avoid downloading it on every run, cache the `go env GOMODCACHE` directory with `actions/cache`.
 - The example always downloads the latest release. For a fully reproducible pipeline, pin the release tag and checksum in repository configuration.
 
 See [Installation and Usage](usage.en.md) for CLI and cache details, and [Analysis](analysis.en.md) for impact semantics.

@@ -121,6 +121,16 @@ func TestBuildConfigurationReadsGoEnvFile(t *testing.T) {
 	}
 }
 
+// A failing go command reports what it printed, such as a Go toolchain it
+// cannot download, rather than only its exit status.
+func TestBuildConfigurationReportsGoCommandOutput(t *testing.T) {
+	t.Setenv("GOTOOLCHAIN", "invalid")
+	_, err := buildConfiguration(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "GOTOOLCHAIN") {
+		t.Fatalf("buildConfiguration() error = %v, want the go command's message", err)
+	}
+}
+
 func TestAnalyzeHandlesRecursiveFunctionValue(t *testing.T) {
 	const helperEnv = "RIPPLES_RECURSIVE_FUNCTION_VALUE_HELPER"
 	if os.Getenv(helperEnv) != "1" {

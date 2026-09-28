@@ -88,6 +88,7 @@ jobs:
 - `RIPPLES_CACHE` 必须是绝对路径；示例使用 runner 的临时目录并通过 `actions/cache` 跨任务复用。`RIPPLES_CACHE_MAX_MB`（默认 1024）限制缓存总大小，也就限制了 `actions/cache` 保存的体积。
 - `simple` 输出每行一个 `<相对路径>.<package 名>`，适合用 `grep -Fxq` 映射到 binary、service、label 或测试任务；被删除的 package 不会出现在 `simple` 输出中。默认不分析 `_test.go`；用结果选择测试任务时加 `-tests`，只修改测试的 PR 也会报出对应 package。
 - 仓库依赖不提交的生成代码时，在分析命令中加上 `-prepare 'go generate ./...'` 或对应的生成命令，runner 上需要安装生成工具。
+- ripples 用 Release 二进制内置的 Go 版本（`ripples --version` 的 `goVersion`）运行 `go` 命令，runner 上的 Go 版本不同时会自动下载它；想避免每次下载，可以用 `actions/cache` 缓存 `go env GOMODCACHE` 目录。
 - 示例始终下载最新 Release。如果需要完全可复现的流水线，可以把 Release tag 和 checksum 固定在仓库配置中。
 
 更多 CLI 和缓存说明见[安装与使用](usage.md)，影响范围的语义见[分析能力](analysis.md)。

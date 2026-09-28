@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/jimyag/ripples/internal/snapshot"
@@ -291,9 +292,21 @@ func buildConfiguration(ctx context.Context) (string, error) {
 	cmd.Dir = os.TempDir()
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("read go env: %w", err)
+		return "", commandError("read go env", err)
 	}
 	return string(output), nil
+}
+
+// commandError keeps what a failed command printed, which cmd.Output collects
+// in the exit error: the go command explains failures such as a Go toolchain
+// it cannot download only there.
+func commandError(action string, err error) error {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			return fmt.Errorf("%s: %w: %s", action, err, stderr)
+		}
+	}
+	return fmt.Errorf("%s: %w", action, err)
 }
 
 func changedSymbols(

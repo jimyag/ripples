@@ -38,6 +38,27 @@ func TestBinaryPrintsVersion(t *testing.T) {
 	}
 }
 
+func TestBinaryUsesBuildGoToolchain(t *testing.T) {
+	repo := initCLIRepository(t)
+	writeCLIFile(t, repo, "go.mod", "module example.com/app\n\ngo 1.25\n")
+	writeCLIFile(t, repo, "lib/lib.go", "package lib\n\nfunc Value() int { return 1 }\n")
+	oldCommit := commitCLIRepository(t, repo, "old")
+	writeCLIFile(t, repo, "lib/lib.go", "package lib\n\nfunc Value() int { return 2 }\n")
+	newCommit := commitCLIRepository(t, repo, "new")
+
+	binary := filepath.Join(t.TempDir(), "ripples")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+	command := exec.Command(binary, "-repo", repo, "-old", oldCommit, "-new", newCommit)
+	command.Env = append(os.Environ(), "GOTOOLCHAIN=invalid", "RIPPLES_CACHE="+t.TempDir())
+	output, err := command.CombinedOutput()
+	if err != nil || string(output) != "lib.lib\n" {
+		t.Fatalf("ripples output = %q, err = %v; want lib.lib", output, err)
+	}
+}
+
 func TestRunRequiresRevisions(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(t.Context(), nil, &stdout, &stderr)

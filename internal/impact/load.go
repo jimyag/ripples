@@ -214,7 +214,7 @@ func targetSizes(ctx context.Context, dir string) (types.Sizes, error) {
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("go env GOARCH: %w", err)
+		return nil, commandError("go env GOARCH", err)
 	}
 	return types.SizesFor("gc", strings.TrimSpace(string(output))), nil
 }

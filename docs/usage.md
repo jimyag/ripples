@@ -64,7 +64,7 @@ install -m 0755 "$download_dir/$asset" "$HOME/.local/bin/ripples"
 - Go toolchain，用于按照目标仓库的 `go.mod`、构建约束和当前环境加载 package。
 - `-repo` 指定的 Go module 目录可以执行 `go list ./...`；指定 `-tests` 时需要 `go list -test ./...`，也就是测试文件也需要能编译。仓库不提交的生成代码可以用 `-prepare` 生成。
 
-即使通过 Release 安装了预编译二进制，分析目标 Go 项目时仍需要匹配该项目的 Go toolchain。ripples 也会使用编译进二进制的 Go 版本检查源码类型；该版本必须支持待分析的两个 revision 声明的 Go 版本。可以用 `ripples --version` 查看二进制的 `goVersion`。目标项目升级 Go 次版本时，应更新 ripples Release，无需自行编译。
+即使通过 Release 安装了预编译二进制，分析时仍需要本机安装 Go 1.21 或更新版本（支持 `GOTOOLCHAIN` 切换）。ripples 用编译进二进制的 Go 版本检查源码类型，而它读不了其他 Go 版本生成的 export data（例如 go1.26 构建的二进制读不了 go1.27 生成的），所以 ripples 启动的每个 `go` 命令（包括 `-prepare` 执行的命令）都会把 `GOTOOLCHAIN` 设为这个版本，环境变量或 `go env -w` 中的 `GOTOOLCHAIN` 设置不再生效。本机没有这个版本时，`go` 命令会通过 `GOPROXY` 下载并缓存在 module cache 中；离线环境需要提前准备，例如联网时执行一次 `GOTOOLCHAIN=<goVersion> go version`。这个版本必须支持待分析的两个 revision 声明的 Go 版本，否则 `go` 命令会报 `go.mod requires go >= ...`。可以用 `ripples --version` 查看二进制的 `goVersion`。目标项目升级 Go 次版本时，应更新 ripples Release，无需自行编译。
 
 ## CLI
 

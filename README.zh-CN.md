@@ -76,7 +76,7 @@ ripples --version
 
 也可以从 [GitHub Release](https://github.com/jimyag/ripples/releases/latest) 下载 Linux、macOS 和 Windows 的 amd64/arm64 原始二进制。
 
-分析目标项目时仍需要 `git`、匹配项目的 Go toolchain，以及能够执行 `go list ./...` 的 Go module（指定 `-tests` 时为 `go list -test ./...`）。平台二进制下载命令和完整运行要求见[安装与使用](docs/usage.md)。
+分析目标项目时仍需要 `git`、Go 1.21 或更新版本（ripples 会切换到构建它的 Go 版本），以及能够执行 `go list ./...` 的 Go module（指定 `-tests` 时为 `go list -test ./...`）。平台二进制下载命令和完整运行要求见[安装与使用](docs/usage.md)。
 
 ## 快速开始
 

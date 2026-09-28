@@ -138,7 +138,7 @@ func goWorkFile(ctx context.Context, dir string) (string, error) {
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("go env GOWORK: %w", err)
+		return "", commandError("go env GOWORK", err)
 	}
 	if filename := strings.TrimSpace(string(output)); filename != "off" {
 		return filename, nil

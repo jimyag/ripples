@@ -76,7 +76,7 @@ ripples --version
 
 You can also download raw amd64 and arm64 binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/jimyag/ripples/releases/latest).
 
-Analyzing a target project still requires `git`, a compatible Go toolchain, and a Go module where `go list ./...` succeeds (`go list -test ./...` with `-tests`). See [Installation and Usage](docs/usage.en.md) for platform download commands and complete runtime requirements.
+Analyzing a target project still requires `git`, Go 1.21 or later (ripples switches it to the Go version it was built with), and a Go module where `go list ./...` succeeds (`go list -test ./...` with `-tests`). See [Installation and Usage](docs/usage.en.md) for platform download commands and complete runtime requirements.
 
 ## Quick Start
 
