@@ -98,6 +98,8 @@ payment.payment
 
 参数、输出格式和缓存配置见[安装与使用](docs/usage.md)。
 
+PR 中可以使用 [ripples-action](https://github.com/jimyag/ripples-action) 获取受影响 package 和 `main` 入口的 JSON 输出，并通过独立 workflow 发布评论，包括 fork PR。配置方法和当前限制见 [GitHub Actions](docs/ci.md)。
+
 ## 影响关系图
 
 使用 `dot` 输出 package 反向关系图，再通过 Graphviz 转换为 SVG：
@@ -119,8 +121,8 @@ dot -Tsvg impact.dot -o impact.svg
 | --- | --- |
 | [安装与使用](docs/usage.md) | 安装方式、CLI 参数、输出格式、DOT 和缓存 |
 | [分析能力](docs/analysis.md) | 分析原理、支持的 Go 使用方式和明确边界 |
-| [实现架构](docs/architecture.md) | revision 快照、声明图、值流、反向传播、缓存和并发实现 |
-| [GitHub Actions](docs/ci.md) | Release 下载、checksum、缓存和下游任务映射 |
+| [实现架构](docs/architecture.md) | revision 快照、声明图、接口契约、反向传播、缓存和并发实现 |
+| [GitHub Actions](docs/ci.md) | Action 输出、PR 评论、CLI 集成、缓存和下游任务映射 |
 
 ## 开发
 

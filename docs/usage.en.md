@@ -107,7 +107,7 @@ ripples -repo . -old origin/main -new HEAD -tests
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `-repo` | Git repository and Go module root | `.` |
+| `-repo` | Go module directory inside a Git repository, including a subdirectory | `.` |
 | `-old` | Old commit ID or ref | required |
 | `-new` | New commit ID or ref | required |
 | `-output` | `simple`, `json`, `text`, `summary`, or `dot`; validated before analysis | `simple` |
@@ -199,7 +199,7 @@ Cache keys include:
 - Git tree
 - Go module path relative to the Git repository root
 - ripples analysis format version and the Go version ripples was built with (the `go/types` version)
-- Effective values reported by `go env`: `GOOS`, `GOARCH`, `CGO_ENABLED`, `GOFLAGS`, `GOEXPERIMENT`, `GOVERSION`, `GOTOOLCHAIN`, `GOWORK`, and architecture levels such as `GOAMD64`; both environment variables and settings written with `go env -w` count
+- Effective values reported by `go env`: `GOOS`, `GOARCH`, `CGO_ENABLED`, `GOFLAGS`, `GOEXPERIMENT`, `GOVERSION`, `GOTOOLCHAIN`, `GOWORK`, and architecture levels such as `GOAMD64`; environment variables and settings written with `go env -w` count, except that `GOTOOLCHAIN` uses the version fixed at ripples startup
 - The `-prepare` command and `-tests`
 
 A snapshot contains the declaration dependency graph for the current build, package content hashes, and the mapping from local packages to third-party modules. Module information and the declaration graph come from the same export, so both always describe one Git tree.

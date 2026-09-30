@@ -98,6 +98,8 @@ payment.payment
 
 See [Installation and Usage](docs/usage.en.md) for options, output formats, and cache configuration.
 
+For pull requests, [ripples-action](https://github.com/jimyag/ripples-action) exposes affected packages and `main` entry points as JSON outputs and provides a separate workflow for PR comments, including fork PRs. See [GitHub Actions](docs/ci.en.md) for configuration and current limitations.
+
 ## Impact Graph
 
 Emit a reverse package graph with `dot`, then convert it to SVG with Graphviz:
@@ -119,8 +121,8 @@ A red border marks a package containing changed declarations. Arrows point to pa
 | --- | --- |
 | [Installation and Usage](docs/usage.en.md) | Installation, CLI options, output formats, DOT, and caching |
 | [Analysis](docs/analysis.en.md) | Analysis model, supported Go usage patterns, and explicit boundaries |
-| [Architecture](docs/architecture.en.md) | Revision snapshots, symbol graph, value flow, reverse propagation, cache, and concurrency |
-| [GitHub Actions](docs/ci.en.md) | Release download, checksum verification, caching, and downstream job mapping |
+| [Architecture](docs/architecture.en.md) | Revision snapshots, declaration graph, interface contracts, reverse propagation, cache, and concurrency |
+| [GitHub Actions](docs/ci.en.md) | Action outputs, PR comments, CLI integration, caching, and downstream job mapping |
 
 ## Development
 

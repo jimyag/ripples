@@ -107,7 +107,7 @@ ripples -repo . -old origin/main -new HEAD -tests
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| `-repo` | Git 仓库及 Go module 根目录 | `.` |
+| `-repo` | Git 仓库中的 Go module 目录，可为子目录 | `.` |
 | `-old` | 旧 commit ID 或 ref | 必填 |
 | `-new` | 新 commit ID 或 ref | 必填 |
 | `-output` | `simple`、`json`、`text`、`summary` 或 `dot`；在分析前校验 | `simple` |
@@ -199,7 +199,7 @@ RIPPLES_CACHE=/absolute/path/to/cache ripples \
 - Git tree
 - Go module 在 Git 仓库中的相对目录
 - ripples 分析格式版本和编译 ripples 的 Go 版本（`go/types` 版本）
-- `go env` 报告的实际生效值：`GOOS`、`GOARCH`、`CGO_ENABLED`、`GOFLAGS`、`GOEXPERIMENT`、`GOVERSION`、`GOTOOLCHAIN`、`GOWORK` 和 `GOAMD64` 等架构级别；环境变量和 `go env -w` 写入的设置都会生效
+- `go env` 报告的实际生效值：`GOOS`、`GOARCH`、`CGO_ENABLED`、`GOFLAGS`、`GOEXPERIMENT`、`GOVERSION`、`GOTOOLCHAIN`、`GOWORK` 和 `GOAMD64` 等架构级别；环境变量和 `go env -w` 写入的设置会参与计算，但 `GOTOOLCHAIN` 使用 ripples 启动时固定的版本
 - `-prepare` 命令和 `-tests`
 
 snapshot 包含当前构建中的声明依赖图、package 内容哈希，以及本地 package 到第三方 module 的依赖关系。module 信息和声明图来自同一次导出，保证两者描述同一个 Git tree。
