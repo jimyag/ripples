@@ -333,7 +333,7 @@ func readExportFile(fset *token.FileSet, imports map[string]*types.Package, pkg 
 	defer func() {
 		returnErr = errors.Join(returnErr, file.Close())
 	}()
-	reader, err := gcexportdata.NewReader(file)
+	reader, err := gcexportdata.NewReader(file) //nolint:staticcheck // shortcut: Go 1.26/1.27 export archives; migrate when targeting Go 1.28's export format.
 	if err != nil {
 		return nil, fmt.Errorf("read export data of %s: %w", pkg.PkgPath, err)
 	}
