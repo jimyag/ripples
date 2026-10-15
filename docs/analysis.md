@@ -155,7 +155,7 @@ func main() { service.New(store.FileStore{}).Run() }
 - 汇编、C/C++、头文件和 syso 等非 Go 源文件变化时，没有 Go 函数体的声明（由汇编实现）和经 cgo 处理的文件中的声明会传播到它们的调用方。
 - `go.mod` 和实际生效的 `go.work` 的有效构建配置变化会影响对应构建；go.work 按 go 命令的规则定位，可以位于 `-repo` 的父目录。
 - dependency 版本或 `replace` 变化只影响实际传递依赖该 module 的本地 package。
-- 仅增加或移除传递依赖不视为已有 dependency 版本变化；源码变化沿声明引用传播。新增或删除中间 package 时，比较已有 package 实际可达的初始化集合，不重复传播已可达的初始化；新引入的初始化仍影响导入方。
+- 仅增加或移除传递依赖不视为已有 dependency 版本变化；源码变化沿声明引用传播。新增或删除中间 package 时，比较已有 package 实际可达的初始化集合，不重复传播已可达的初始化；新引入的初始化仍影响导入方。第三方 package 的实现按黑盒处理，首次引入或移除时保守地视为初始化变化；已经可达的第三方 package 不重复传播。
 - `go.sum`、`go.work.sum` 新增或删除普通缓存记录不会产生影响；同一 module 版本的 checksum 改变会传播到实际使用者。
 
 ## 明确边界

@@ -907,6 +907,7 @@ func TestAnalyzeNewPackageInitialization(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		sharedInit string
+		mainInit   string
 		newInit    string
 		affected   bool
 	}{
@@ -918,6 +919,11 @@ func TestAnalyzeNewPackageInitialization(t *testing.T) {
 			sharedInit: `import _ "example.com/app/startup"`,
 			newInit:    `import _ "example.com/app/startup"`,
 		},
+		{
+			name:     "binary already reaches initialization through another import",
+			mainInit: `import _ "example.com/app/startup"`,
+			newInit:  `import _ "example.com/app/startup"`,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repo := initModule(t)
@@ -926,7 +932,7 @@ func TestAnalyzeNewPackageInitialization(t *testing.T) {
 			writeModuleFile(t, repo, "cmd/server/main.go", `package main
 
 import "example.com/app/shared"
-
+`+test.mainInit+`
 func main() { println(shared.Stable()) }
 `)
 			oldCommit := commitModule(t, repo, "old")
@@ -954,6 +960,61 @@ func Unused() newpkg.Config { return newpkg.Config{} }
 					t.Fatal(err)
 				}
 				assertPackages(t, got, want)
+			}
+		})
+	}
+}
+
+func TestAnalyzeNewDependencyInitialization(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		mainImport string
+		want       []string
+	}{
+		{name: "new dependency", want: []string{"cmd/server.main", "shared.shared"}},
+		{
+			name:       "already transitively reachable dependency",
+			mainImport: `import _ "example.com/dependency/wrapper"`,
+			want:       []string{"shared.shared"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			writeModuleFile(t, repo, "go.mod", `module example.com/app
+
+go 1.26
+
+require example.com/dependency v0.0.0
+
+replace example.com/dependency => ./dependency
+`)
+			writeModuleFile(t, repo, "dependency/go.mod", "module example.com/dependency\n\ngo 1.26\n")
+			writeModuleFile(t, repo, "dependency/dependency.go", "package dependency\n\nconst Value = 1\n\nfunc init() { println(1) }\n")
+			writeModuleFile(t, repo, "dependency/wrapper/wrapper.go", "package wrapper\n\nimport _ \"example.com/dependency\"\n")
+			writeModuleFile(t, repo, "shared/shared.go", "package shared\n\nfunc Stable() int { return 1 }\n")
+			writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/shared"
+`+test.mainImport+`
+func main() { println(shared.Stable()) }
+`)
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+import "example.com/dependency"
+
+func Stable() int { return 1 }
+
+func Unused() int { return dependency.Value }
+`)
+			newCommit := commitModule(t, repo, "new")
+			analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+			for _, refs := range [][2]string{{oldCommit, newCommit}, {newCommit, oldCommit}} {
+				got, err := analyzer.Analyze(t.Context(), repo, refs[0], refs[1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertPackages(t, got, test.want)
 			}
 		})
 	}

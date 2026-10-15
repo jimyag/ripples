@@ -542,12 +542,31 @@ func addInitializationDependencies(
 	for _, pkg := range slices.Concat(localPackages, recompiled) {
 		localIDs[pkg.ID] = true
 	}
+	importedEffects := make(map[*gopackages.Package]map[string]struct{})
+	var importedInitializers func(*gopackages.Package) map[string]struct{}
+	importedInitializers = func(pkg *gopackages.Package) map[string]struct{} {
+		if localIDs[pkg.ID] {
+			return map[string]struct{}{packageInitID(pkg.ID): {}}
+		}
+		if pkg.Module == nil {
+			return nil
+		}
+		if effects, ok := importedEffects[pkg]; ok {
+			return effects
+		}
+		// Dependency bodies are opaque; include their transitive initialization
+		// so importing an already reachable dependency does not propagate twice.
+		effects := map[string]struct{}{packageObjectID(pkg.PkgPath, "dependency-init", "$init"): {}}
+		importedEffects[pkg] = effects
+		for _, imported := range pkg.Imports {
+			maps.Copy(effects, importedInitializers(imported))
+		}
+		return effects
+	}
 	for _, pkg := range recompiled {
 		dependencies := map[string]struct{}{packageInitID(pkg.PkgPath): {}}
 		for _, imported := range pkg.Imports {
-			if localIDs[imported.ID] {
-				dependencies[packageInitID(imported.ID)] = struct{}{}
-			}
+			maps.Copy(dependencies, importedInitializers(imported))
 		}
 		id := packageInitID(pkg.ID)
 		symbols[id] = Symbol{
@@ -571,9 +590,7 @@ func addInitializationDependencies(
 			dependencies[id] = struct{}{}
 		}
 		for _, imported := range pkg.Imports {
-			if localIDs[imported.ID] {
-				dependencies[packageInitID(imported.ID)] = struct{}{}
-			}
+			maps.Copy(dependencies, importedInitializers(imported))
 		}
 		for _, file := range pkg.Syntax {
 			for _, declaration := range file.Decls {

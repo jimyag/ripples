@@ -156,7 +156,7 @@ Conversion sites stay independent: when two binaries inject different implementa
 - When non-Go sources such as assembly, C/C++, headers, or syso files change, declarations without a Go body (implemented in assembly) and declarations from cgo-processed files propagate to their callers.
 - Effective `go.mod` and `go.work` build configuration changes affect the relevant build. `go.work` is located the way the go command locates it and may live in a parent directory of `-repo`.
 - Dependency version or `replace` changes affect only local packages that transitively use the relevant module.
-- Adding or removing a transitive dependency is not a version change to an existing dependency; source changes propagate through declaration references. Adding or removing an intermediate package compares the initializers actually reachable from existing packages, without propagating already reachable initialization again. Newly introduced initialization still affects importers.
+- Adding or removing a transitive dependency is not a version change to an existing dependency; source changes propagate through declaration references. Adding or removing an intermediate package compares the initializers actually reachable from existing packages, without propagating already reachable initialization again. Newly introduced initialization still affects importers. Third-party package implementations remain black boxes: first introducing or removing one conservatively counts as an initialization change, while an already reachable third-party package does not propagate again.
 - Adding or removing ordinary cache entries in `go.sum` or `go.work.sum` has no impact. A checksum change for the same module version propagates to actual users.
 
 ## Explicit Boundaries

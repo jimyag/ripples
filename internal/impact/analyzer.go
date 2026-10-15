@@ -17,7 +17,7 @@ import (
 	"github.com/jimyag/ripples/internal/snapshot"
 )
 
-const analysisVersion = "symbol-impact-v31"
+const analysisVersion = "symbol-impact-v32"
 
 // Analyzer computes declaration-level impact between two Git revisions.
 type Analyzer struct {
@@ -380,8 +380,18 @@ func packageInitializers(symbols map[string]Symbol) map[string]map[string]struct
 func reverseDependencies(snapshots ...*PackageSnapshot) map[string]map[string]struct{} {
 	reverse := make(map[string]map[string]struct{})
 	for _, packageSnapshot := range snapshots {
+		initializers := packageInitializers(packageSnapshot.Symbols)
 		for _, symbol := range packageSnapshot.Symbols {
-			for _, dependency := range symbol.Dependencies {
+			dependencies := symbol.Dependencies
+			if effects, ok := initializers[symbol.ID]; ok {
+				// Topology changes affect only packages whose initializer set
+				// changed; changed initializer bodies still reach every user.
+				dependencies = sortedSet(effects)
+			}
+			for _, dependency := range dependencies {
+				if dependency == symbol.ID {
+					continue
+				}
 				if _, local := packageSnapshot.Symbols[dependency]; !local {
 					continue
 				}
