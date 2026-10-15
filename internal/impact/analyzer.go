@@ -314,6 +314,8 @@ func changedSymbols(
 	moduleChanges map[string]struct{},
 ) map[string]struct{} {
 	changed := make(map[string]struct{})
+	oldInitializers := packageInitializers(oldSnapshot.Symbols)
+	newInitializers := packageInitializers(newSnapshot.Symbols)
 	all := make(map[string]struct{}, len(oldSnapshot.Symbols)+len(newSnapshot.Symbols))
 	for id := range oldSnapshot.Symbols {
 		all[id] = struct{}{}
@@ -325,6 +327,15 @@ func changedSymbols(
 	for id := range all {
 		oldSymbol, oldOK := oldSnapshot.Symbols[id]
 		newSymbol, newOK := newSnapshot.Symbols[id]
+		if strings.HasSuffix(id, "::package-init::$init") {
+			// New intermediate packages do not rerun existing initializers.
+			// Compare the actual initialization reachable from existing packages.
+			if oldOK && newOK && (oldSymbol.Hash != newSymbol.Hash ||
+				!maps.Equal(oldInitializers[id], newInitializers[id])) {
+				changed[id] = struct{}{}
+			}
+			continue
+		}
 		if !oldOK || !newOK || oldSymbol.Hash != newSymbol.Hash {
 			changed[id] = struct{}{}
 		}
@@ -333,6 +344,37 @@ func changedSymbols(
 		changed[packageInitID(packagePath)] = struct{}{}
 	}
 	return changed
+}
+
+func packageInitializers(symbols map[string]Symbol) map[string]map[string]struct{} {
+	result := make(map[string]map[string]struct{})
+	emptyHash := stableMarkerHash("package-init")
+	var collect func(string) map[string]struct{}
+	collect = func(id string) map[string]struct{} {
+		if dependencies, ok := result[id]; ok {
+			return dependencies
+		}
+		dependencies := make(map[string]struct{})
+		result[id] = dependencies
+		symbol := symbols[id]
+		if symbol.Hash != emptyHash {
+			dependencies[id] = struct{}{}
+		}
+		for _, dependency := range symbol.Dependencies {
+			if strings.HasSuffix(dependency, "::package-init::$init") {
+				maps.Copy(dependencies, collect(dependency))
+			} else {
+				dependencies[dependency] = struct{}{}
+			}
+		}
+		return dependencies
+	}
+	for id := range symbols {
+		if strings.HasSuffix(id, "::package-init::$init") {
+			collect(id)
+		}
+	}
+	return result
 }
 
 func reverseDependencies(snapshots ...*PackageSnapshot) map[string]map[string]struct{} {

@@ -302,12 +302,29 @@ func changedModulePackages(oldSnapshot, newSnapshot *moduleSnapshot) map[string]
 			continue
 		}
 		if oldSnapshot.GlobalHash != newSnapshot.GlobalHash ||
-			!equalStrings(oldPackage.Modules, newPackage.Modules) ||
+			moduleVersionsChanged(oldPackage.Modules, newPackage.Modules) ||
 			packageChecksumChanged(oldPackage, newPackage, oldSnapshot.Sums, newSnapshot.Sums) {
 			changed[path] = struct{}{}
 		}
 	}
 	return changed
+}
+
+// Import additions and removals are tracked by the declaration graph; only
+// changes to a dependency used in both revisions invalidate the whole package.
+func moduleVersionsChanged(oldModules, newModules []string) bool {
+	oldVersions := make(map[string]string, len(oldModules))
+	for _, identity := range oldModules {
+		path, _, _ := strings.Cut(identity, "@")
+		oldVersions[path] = identity
+	}
+	for _, identity := range newModules {
+		path, _, _ := strings.Cut(identity, "@")
+		if old, ok := oldVersions[path]; ok && old != identity {
+			return true
+		}
+	}
+	return false
 }
 
 func packageChecksumChanged(
@@ -331,16 +348,4 @@ func packageChecksumChanged(
 		}
 	}
 	return false
-}
-
-func equalStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }

@@ -30,6 +30,34 @@ func TestChangedModulePackages(t *testing.T) {
 			},
 		},
 		{
+			name: "unused declaration adds a transitive module",
+			old: moduleSnapshot{Packages: map[string]packageModules{
+				"example.com/app/service": {Modules: []string{"example.com/dependency@v1.0.0"}},
+			}},
+			new: moduleSnapshot{Packages: map[string]packageModules{
+				"example.com/app/service": {Modules: []string{"example.com/dependency@v1.0.0", "example.com/extra@v1.0.0"}},
+			}},
+		},
+		{
+			name: "unused declaration removes a transitive module",
+			old: moduleSnapshot{Packages: map[string]packageModules{
+				"example.com/app/service": {Modules: []string{"example.com/dependency@v1.0.0", "example.com/extra@v1.0.0"}},
+			}},
+			new: moduleSnapshot{Packages: map[string]packageModules{
+				"example.com/app/service": {Modules: []string{"example.com/dependency@v1.0.0"}},
+			}},
+		},
+		{
+			name: "module replacement changed",
+			old: moduleSnapshot{Packages: map[string]packageModules{
+				"example.com/app/service": {Modules: []string{"example.com/dependency@v1.0.0=>./old@"}},
+			}},
+			new: moduleSnapshot{Packages: map[string]packageModules{
+				"example.com/app/service": {Modules: []string{"example.com/dependency@v1.0.0=>./new@"}},
+			}},
+			want: true,
+		},
+		{
 			name: "module version changed",
 			old: moduleSnapshot{
 				GlobalHash: "global",

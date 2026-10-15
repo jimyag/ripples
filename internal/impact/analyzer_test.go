@@ -903,6 +903,62 @@ func (Job) Run() { println("new") }
 	})
 }
 
+func TestAnalyzeNewPackageInitialization(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		sharedInit string
+		newInit    string
+		affected   bool
+	}{
+		{name: "no initialization"},
+		{name: "new initialization", newInit: "func init() { println(1) }", affected: true},
+		{name: "existing initialization through a new import", newInit: `import _ "example.com/app/startup"`, affected: true},
+		{
+			name:       "existing initialization already reachable",
+			sharedInit: `import _ "example.com/app/startup"`,
+			newInit:    `import _ "example.com/app/startup"`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := initModule(t)
+			writeModuleFile(t, repo, "startup/startup.go", "package startup\n\nfunc init() { println(1) }\n")
+			writeModuleFile(t, repo, "shared/shared.go", "package shared\n\n"+test.sharedInit+"\nfunc Stable() int { return 1 }\n")
+			writeModuleFile(t, repo, "cmd/server/main.go", `package main
+
+import "example.com/app/shared"
+
+func main() { println(shared.Stable()) }
+`)
+			oldCommit := commitModule(t, repo, "old")
+			writeModuleFile(t, repo, "newpkg/new.go", "package newpkg\n\ntype Config struct { Weight int }\n")
+			if test.newInit != "" {
+				writeModuleFile(t, repo, "newpkg/init.go", "package newpkg\n\n"+test.newInit+"\n")
+			}
+			writeModuleFile(t, repo, "shared/shared.go", `package shared
+
+import "example.com/app/newpkg"
+
+func Stable() int { return 1 }
+
+func Unused() newpkg.Config { return newpkg.Config{} }
+`)
+			newCommit := commitModule(t, repo, "new")
+			want := []string{"newpkg.newpkg", "shared.shared"}
+			if test.affected {
+				want = append([]string{"cmd/server.main"}, want...)
+			}
+			analyzer := NewAnalyzer(&snapshot.Cache{Dir: t.TempDir()})
+			for _, refs := range [][2]string{{oldCommit, newCommit}, {newCommit, oldCommit}} {
+				got, err := analyzer.Analyze(t.Context(), repo, refs[0], refs[1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertPackages(t, got, want)
+			}
+		})
+	}
+}
+
 func TestAnalyzePropagatesPackageInitializationChange(t *testing.T) {
 	repo := initModule(t)
 	writeModuleFile(t, repo, "startup/startup.go", `package startup
