@@ -1,6 +1,8 @@
 module github.com/jimyag/ripples
 
-go 1.26.8
+go 1.27
+
+toolchain go1.27.3
 
 require (
 	github.com/emicklei/dot v1.11.0
