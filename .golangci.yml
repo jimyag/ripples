@@ -54,5 +54,6 @@ formatters:
     - goimports
 
 issues:
+  new-from-rev: HEAD~
   max-issues-per-linter: 0
   max-same-issues: 0
