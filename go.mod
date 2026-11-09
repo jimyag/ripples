@@ -7,7 +7,7 @@ toolchain go1.27.3
 require (
 	github.com/emicklei/dot v1.11.0
 	github.com/jimmicro/version v1.1.0
-	golang.org/x/mod v0.42.0
+	golang.org/x/mod v0.43.0
 	golang.org/x/tools v0.52.0
 )
 
